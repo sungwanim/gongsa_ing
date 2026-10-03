@@ -16,7 +16,9 @@ def main():
     Main function to spawn the train and test process.
     """
     args = parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+    # only override when --device is given, so a MIG UUID set by the server is kept
+    if args.device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.device
 
     for path_to_config in args.cfg_files:
         # merge config and args, mkdir image_save and checkpoints

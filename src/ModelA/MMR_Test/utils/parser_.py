@@ -21,8 +21,8 @@ def parse_args():
     parser.add_argument(
         "--device",
         dest="device",
-        help="the device to train model",
-        default="0",
+        help="the device to train model (sets CUDA_VISIBLE_DEVICES; omit to keep the current env)",
+        default=None,
     )
     parser.add_argument(
         "--cfg",

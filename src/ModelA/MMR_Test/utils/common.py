@@ -143,11 +143,11 @@ def compute_pro(anomaly_map: ndarray, gt_mask: ndarray, label: ndarray, num_th: 
     current_amap = anomaly_map[label != 0]
     current_mask = gt_mask[label != 0].astype(int)
 
-    binary_amaps = np.zeros_like(current_amap[0], dtype=np.bool)
+    binary_amaps = np.zeros_like(current_amap[0], dtype=bool)
     pro_auc_list = []
 
     for anomaly_mask, mask in zip(current_amap, current_mask):
-        df = pd.DataFrame([], columns=["pro", "fpr", "threshold"])
+        rows = []
         min_th = anomaly_mask.min()
         max_th = anomaly_mask.max()
         delta = (max_th - min_th) / num_th
@@ -169,8 +169,10 @@ def compute_pro(anomaly_map: ndarray, gt_mask: ndarray, label: ndarray, num_th: 
 
             fpr = fp_pixels / inverse_masks.sum()
 
-            df = df.append({"pro": mean(pros), "fpr": fpr, "threshold": th}, ignore_index=True)
+            # DataFrame.append was removed in pandas 2.0
+            rows.append({"pro": mean(pros), "fpr": fpr, "threshold": th})
 
+        df = pd.DataFrame(rows, columns=["pro", "fpr", "threshold"])
         # Normalize FPR from 0 ~ 1 to 0 ~ 0.3
         df = df[df["fpr"] < 0.3]
         df["fpr"] = df["fpr"] / df["fpr"].max()

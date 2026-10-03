@@ -14,7 +14,7 @@ TRAIN:
   enable: True
   save_model: False
   method: 'MMR'
-  dataset_path: '/usr/sdd/zzl_data/AeBAD'
+  dataset_path: '../../../AeBAD'
   backbone: 'wideresnet50'
 
   MMR:
@@ -25,7 +25,7 @@ TRAIN:
     scale_factors : (4.0, 2.0, 1.0)
     FPN_output_dim : (256, 512, 1024)
     load_pretrain_model : True
-    model_chkpt : "../low_level_anomaly_detection/mae_visualize_vit_base.pth"
+    model_chkpt : "/home/team14/weights/mae_visualize_vit_base.pth"
     finetune_mask_ratio : 0.4
     test_mask_ratio : 0.
 
@@ -42,7 +42,7 @@ TEST:
   enable: False
   save_segmentation_images: True
   method: 'MMR'
-  dataset_path: '/usr/sdd/zzl_data/AeBAD'
+  dataset_path: '../../../AeBAD'
 
   VISUALIZE:
     Random_sample: True
