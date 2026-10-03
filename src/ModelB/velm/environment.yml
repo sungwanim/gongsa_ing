@@ -1,0 +1,20 @@
+name: velm_qwen
+
+channels:
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch==2.8.0
+      - torchvision==0.23.0
+      - transformers==5.18.0
+      - accelerate==1.15.0
+      - qwen-vl-utils==0.0.14
+      - pillow
+      - opencv-python==5.0.0.93
+      - numpy
+      - scikit-learn==1.7.2
+      - tqdm==4.70.1
+      - pyyaml==6.0.3
