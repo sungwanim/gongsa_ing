@@ -633,14 +633,15 @@ def tradeoff_v8(a, rows):
         "MMR목표", "t목표", "t", "Acc", "Prec", "Recall", "FPR", "F1", "놓친불량(FN)", "오탐(FP)"))
     print("{:>10} {:>10} | {:>6} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
         "MMR단독", "-", "-", base["Accuracy"], base["Precision"], base["Recall"], base["FPR"], base["F1"], base["FN"], base["FP"]))
-    for rt in (0.95, 0.98, 0.99):
+    rts, nrs = ((0.98, 0.99, 0.995, 1.0), (0.97, 0.98, 0.99, 0.995, 0.999)) if a.tradeoff_high else ((0.95, 0.98, 0.99), (0.95, 0.97, 0.98, 0.99))
+    for rt in rts:
         lo, hi = calibrate_v10(calib, rt, a.fpr_hi)
         mark_zones_v10(rows, lo, hi)
         need = [r for r in rows if r["zone10"] != "clear_normal" and key(r) not in pm]
         if need:
             print("{:>10.2f} (Qwen 결과가 없는 이미지 {}장이 있어 건너뜀 -> --recall-target {} --step qwen 으로 먼저 추가 판정하세요)".format(rt, len(need), rt))
             continue
-        for nr in (0.95, 0.97, 0.98, 0.99):
+        for nr in nrs:
             t = choose_t_by_recall(calib, pm, None, nr)
             m = v10_summary(report, pm, t, None)
             mark = "  <- 재현율이 MMR 이상" if m["Recall"] >= base["Recall"] else ""
@@ -779,6 +780,7 @@ def main():
     p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
     p.add_argument("--v8-rule", action="store_true", help="v8 방식(참고 불량 12장)의 Qwen 확률에 v10 판정 규칙을 적용해 평가. 예: --prompt v8_n12 --v8-rule")
     p.add_argument("--tradeoff", action="store_true", help="--v8-rule 과 함께: 재현율 목표를 바꿔 가며 오탐/놓친 불량이 어떻게 달라지는지 표로 출력 (GPU 불필요)")
+    p.add_argument("--tradeoff-high", action="store_true", help="--tradeoff 와 함께: 재현율을 최대한 올리는 쪽(MMR 목표 0.98~1.0, t 목표 0.97~0.999)만 표로 출력")
     p.add_argument("--normal-recall", type=float, default=0.95, help="v10/--v8-rule: 보정용 절반에서 시스템 재현율이 이 값 이상이 되는 가장 작은 t를 자동 선택 (기본 0.95). 0이면 --normal-thr 고정값 사용")
     p.add_argument("--type-bias", dest="type_bias", action="store_true", help="클래스별 쏠림 보정을 켠다 (보정용 절반으로 학습). 기본은 끔: 시험에서 타입 맞힘이 오히려 줄었음 (334 -> 304 / 580)")
     p.add_argument("--no-type-bias", dest="type_bias", action="store_false", help="(기본값) 쏠림 보정을 끈다")
