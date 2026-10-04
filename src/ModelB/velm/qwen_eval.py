@@ -49,8 +49,8 @@ def key(r):
 
 
 def run_qwen(rows, out_dir, limit=None):
-    from run_qwen import load_model, classify_image, validate_result   # velm 코드 그대로 사용
-    fpath = os.path.join(out_dir, "qwen_results_v2.jsonl")
+    from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
+    fpath = os.path.join(out_dir, "qwen_results_v3.jsonl")
     done = set()
     if os.path.exists(fpath):
         with open(fpath) as f:
@@ -65,13 +65,14 @@ def run_qwen(rows, out_dir, limit=None):
     with open(fpath, "a") as f:
         for n, r in enumerate(todo, 1):
             try:
-                raw = classify_image(resolve(r["path"]), model, processor)
-                res = validate_result(raw)
+                out = classify_image(resolve(r["path"]), model, processor)
             except Exception as e:
-                raw, res = "ERROR: {}".format(e), "unknown"
-            f.write(json.dumps({"key": key(r), "raw": raw, "pred_type": res}, ensure_ascii=False) + "\n")
+                out = {"label": "unknown", "confidence": 0.0, "probs": {}, "class_mass": 0.0, "raw": "ERROR: {}".format(e)}
+            f.write(json.dumps({"key": key(r), "raw": out["raw"], "pred_type": out["label"],
+                                "confidence": out["confidence"], "probs": out["probs"],
+                                "class_mass": out["class_mass"]}, ensure_ascii=False) + "\n")
             f.flush()
-            print("[{}/{}] {} -> {}".format(n, len(todo), os.path.basename(r["path"]), res), flush=True)
+            print("[{}/{}] {} -> {} ({:.1%})".format(n, len(todo), os.path.basename(r["path"]), out["label"], out["confidence"]), flush=True)
 
 
 def metrics(y, pred, score=None):
@@ -88,13 +89,15 @@ def metrics(y, pred, score=None):
 
 
 def evaluate(rows, out_dir):
-    qwen = {}
-    fpath = os.path.join(out_dir, "qwen_results_v2.jsonl")
+    qwen, conf = {}, {}
+    fpath = os.path.join(out_dir, "qwen_results_v3.jsonl")
     if os.path.exists(fpath):
         with open(fpath) as f:
             for l in f:
                 if l.strip():
-                    d = json.loads(l); qwen[d["key"]] = "good" if d["pred_type"] == "normal" else d["pred_type"]
+                    d = json.loads(l)
+                    qwen[d["key"]] = "good" if d["pred_type"] == "normal" else d["pred_type"]
+                    conf[d["key"]] = d.get("confidence")
     final = []                       # MMR+Qwen 최종 라벨: good 또는 타입
     for r in rows:
         if r["pred"] == 0:
@@ -136,16 +139,30 @@ def evaluate(rows, out_dir):
     dm = (y == 1) & (pred1 == 1)
     acc = float((final[dm] == typ[dm]).mean()) if dm.any() else 0.0
     unk = int((final == "unknown").sum())
+    # Qwen 확신도 요약 (MMR이 불량으로 넘긴 이미지 기준, 정답 = 정상이면 good / 불량이면 해당 타입)
+    flagged = [i for i in range(len(rows)) if pred1[i] == 1 and conf.get(key(rows[i])) is not None]
+    ok = [conf[key(rows[i])] for i in flagged if final[i] == typ[i]]
+    bad = [conf[key(rows[i])] for i in flagged if final[i] != typ[i]]
+    m = lambda v: "{:.3f}".format(float(np.mean(v))) if v else "-"
+    conf_line = "Qwen 확신도(선택한 클래스 확률) 평균: 맞힌 {}장 {} / 틀린 {}장 {}".format(len(ok), m(ok), len(bad), m(bad))
+    with open(os.path.join(out_dir, "predictions_v3.csv"), "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["domain", "image_path", "true_type", "mmr_score", "mmr_pred", "qwen_label", "confidence", "final"])
+        for i, r in enumerate(rows):
+            wr.writerow([r["domain"], r["path"], typ[i], "{:.6f}".format(r["score"]), pred1[i],
+                         "-" if pred1[i] == 0 else ("normal" if final[i] == "good" else final[i]),
+                         "" if conf.get(key(r)) is None else "{:.4f}".format(conf[key(r)]), final[i]])
     head = ("MMR 불량 판정 {}/{}장 -> Qwen 2차(normal 선택 가능, 정상으로 뒤집은 수는 아래 혼동행렬 good 열) | 불량 타입 분류 정확도(MMR이 잡은 진짜 불량 기준) {:.4f} | unknown {}장\n"
+            "{}\n"
             "AUROC는 MMR 점수 기준. Pixel AUROC / PRO 는 Qwen이 이상 맵을 바꾸지 않으므로 MMR 로그 값과 같음.").format(
-        int(pred1.sum()), len(rows), acc, unk)
+        int(pred1.sum()), len(rows), acc, unk, conf_line)
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
     print(text)
-    with open(os.path.join(out_dir, "comparison_v2.txt"), "w") as f:
+    with open(os.path.join(out_dir, "comparison_v3.txt"), "w") as f:
         f.write(text)
-    with open(os.path.join(out_dir, "comparison_v2.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "comparison_v3.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
-    print("저장: {}/comparison_v2.txt, comparison_v2.csv".format(out_dir))
+    print("저장: {}/comparison_v3.txt, comparison_v3.csv, predictions_v3.csv".format(out_dir))
 
 
 def main():
