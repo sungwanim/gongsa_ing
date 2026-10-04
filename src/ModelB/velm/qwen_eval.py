@@ -130,15 +130,16 @@ def band_info(rows):
     print("\n(참고) 구간이 넓을수록 Qwen이 볼 이미지가 많아집니다. 이 숫자를 보고 --band-pct N 을 정하세요.")
 
 
-def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True, view_fn=None, ref_views=None):
+def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True, view_fn=None, ref_views=None, view_variant="v9", select=None):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
     fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
     done = set()
     if os.path.exists(fpath):
         with open(fpath) as f:
             done = {json.loads(l)["key"] for l in f if l.strip()}
-    todo = [r for r in (subset if subset is not None else rows)
-            if (r["pred"] == 1 or r.get("zone") == "lower_amb") and key(r) not in done]
+    if select is None:
+        select = lambda r: r["pred"] == 1 or r.get("zone") == "lower_amb"
+    todo = [r for r in (subset if subset is not None else rows) if select(r) and key(r) not in done]
     if limit:
         todo = todo[:limit]
     print("Qwen 대상 {}장 (이미 완료 {}장)".format(len(todo), len(done)), flush=True)
@@ -148,7 +149,7 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
     clf = None
     if view_fn is not None:
         from run_qwen import CachedViewClassifier
-        clf = CachedViewClassifier(model, processor, refs, ref_views, view_fn)
+        clf = CachedViewClassifier(model, processor, refs, ref_views, view_fn, variant=view_variant)
     elif refs and use_cache:
         from run_qwen import CachedRefClassifier
         clf = CachedRefClassifier(model, processor, refs, ref_px)
@@ -175,13 +176,38 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
         print("캐시 사용 {}장 / 전체 다시 계산 {}장 (캐시 상태: {})".format(clf.n_cached, clf.n_fallback, clf.state), flush=True)
 
 
-def quick_subset(rows, n):
+def split_of(r):
+    """보정용(calib) / 보고용(report) 절반 분할. 이미지 경로의 해시로 정해서 항상 같다 (도메인/타입이 골고루 섞임)."""
+    import hashlib
+    return "calib" if int(hashlib.md5(key(r).encode()).hexdigest(), 16) % 2 == 0 else "report"
+
+
+def calibrate_v10(rows_calib, recall_target, fpr_hi):
+    """MMR 점수의 임계값 두 개를 보정용 이미지로 정한다.
+       tau_lo : 보정용 불량 중 recall_target 비율 이상이 이 점수 이상이 되도록 하는 가장 큰 값 (불량을 놓치지 않기 위한 아래쪽 기준)
+       tau_hi : 보정용 정상 중 fpr_hi 비율 이하만 이 점수 이상이 되는 값 (이 이상이면 '확실한 불량')"""
+    d = sorted(r["score"] for r in rows_calib if r["label"] == 1)
+    n = sorted(r["score"] for r in rows_calib if r["label"] == 0)
+    k = int(np.floor((1.0 - recall_target) * len(d)))          # 임계값보다 낮아도 되는 불량 수
+    tau_lo = d[min(k, len(d) - 1)]
+    m = int(np.floor(fpr_hi * len(n)))                         # 임계값 이상이어도 되는 정상 수
+    tau_hi = (n[len(n) - m] if m >= 1 else n[-1] + 1e-9)
+    return float(tau_lo), float(max(tau_hi, tau_lo))
+
+
+def mark_zones_v10(rows, tau_lo, tau_hi):
+    for r in rows:
+        r["zone10"] = "clear_normal" if r["score"] < tau_lo else ("confident" if r["score"] >= tau_hi else "amb")
+
+
+def quick_subset(rows, n, cond=None):
     """MMR이 불량으로 넘긴 이미지 중 (정상 포함) 타입별 n장을 고정 시드로 뽑는다 -> 프롬프트끼리 같은 이미지로 비교."""
     import random
     rnd = random.Random(0)
     by = {}
+    cond = cond or (lambda r: r["pred"] == 1)
     for r in rows:
-        if r["pred"] == 1:
+        if cond(r):
             by.setdefault(r["type"], []).append(r)
     sub = []
     for t in ["good"] + TYPES:
@@ -227,8 +253,8 @@ def metrics(y, pred, score=None):
             "F1": d(2 * p * r, p + r), "TP": tp, "FN": fn, "FP": fp, "TN": tn, "ImageAUROC": auc}
 
 
-def evaluate(rows, out_dir, quiet=False, band_pct=None):
-    out_tag = TAG + ("_b{:g}".format(band_pct) if band_pct else "")
+def evaluate(rows, out_dir, quiet=False, band_pct=None, v10=None, out_suffix=""):
+    out_tag = TAG + ("_b{:g}".format(band_pct) if band_pct else "") + out_suffix
     qwen, conf, probs_map = {}, {}, {}
     fpath = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
     if os.path.exists(fpath):
@@ -241,6 +267,23 @@ def evaluate(rows, out_dir, quiet=False, band_pct=None):
                     probs_map[d["key"]] = d.get("probs") or {}
     final = []                       # MMR+Qwen 최종 라벨: good 또는 타입
     for r in rows:
+        if v10 is not None:
+            # v10: MMR 점수 구간 + Qwen 확률.  clear_normal=정상 확정 / confident=불량 확정(Qwen이 못 뒤집음, 타입만 정함) /
+            #      amb=Qwen의 normal 확률이 t_normal 이상일 때만 정상으로 인정, 아니면 불량(타입은 normal 제외 4개 중 확률 최대)
+            z = r["zone10"]
+            if z == "clear_normal":
+                final.append("good")
+                continue
+            if key(r) not in qwen:
+                raise SystemExit("Qwen 결과 누락: {} -> 먼저 --step qwen 으로 Qwen 단계를 실행하세요".format(key(r)))
+            pr = probs_map.get(key(r), {})
+            dp = {k: v for k, v in pr.items() if k != "normal"}
+            best = max(dp, key=dp.get) if dp else "unknown"
+            if z == "confident":
+                final.append(best)
+            else:
+                final.append("good" if pr.get("normal", 0.0) >= v10["t_normal"] else best)
+            continue
         zone = r.get("zone") if band_pct else None
         if band_pct is None:
             # 기본: MMR이 불량으로 본 것은 전부 Qwen이 정상/타입 판정
@@ -419,6 +462,72 @@ def compare_all(rows, out_dir, tags):
     print("저장: {0}/comparison_all.txt, comparison_all.csv".format(out_dir))
 
 
+def run_v10(a, rows):
+    """v10 전체 흐름: 이중 임계값(재현율 기준) -> 구간별로 Qwen(전체 사진 + 의심 부위 크롭, 정상 참고 포함) -> 평가"""
+    global TAG
+    import region_crop
+    refs = build_refs(a.holdout, 1)
+    TAG = "v10_n{}".format(len(refs))
+    print("참고 이미지 {}장 (불량 {} + 정상 {}), 결과 이름 {}".format(
+        len(refs), sum(1 for r in refs if r["label"] != "good"), sum(1 for r in refs if r["label"] == "good"), TAG), flush=True)
+    calib = [r for r in rows if split_of(r) == "calib"]
+    report = [r for r in rows if split_of(r) == "report"]
+    tau_lo, tau_hi = calibrate_v10(calib, a.recall_target, a.fpr_hi)
+    mark_zones_v10(rows, tau_lo, tau_hi)
+    cnt = {}
+    for r in rows:
+        cnt[r["zone10"]] = cnt.get(r["zone10"], 0) + 1
+    thr_old = estimate_threshold(rows)
+    print("이미지 {}장을 반으로 나눔: 보정용 {}장(임계값 정하는 데 사용), 보고용 {}장(성능 보고에 사용)".format(len(rows), len(calib), len(report)))
+    print("MMR 점수 임계값: 아래쪽 tau_lo={:.4f} (보정용 불량의 {:.0%}를 포함), 위쪽 tau_hi={:.4f} (정상 {:.0%}만 이 이상)  | 기존 단일 임계값 {:.4f}".format(
+        tau_lo, a.recall_target, tau_hi, a.fpr_hi, thr_old))
+    print("구간별 이미지 수: {}  (Qwen이 보는 것: 애매 + 확실한 불량 = {}장)".format(cnt, cnt.get("amb", 0) + cnt.get("confident", 0)), flush=True)
+
+    maps = region_crop.MapIndex(a.mmr_out)
+    rk = dict(min_side=a.crop_min, scale=1.5, max_side=a.crop_max)
+    vk = dict(overview_side=504, crop_side=a.crop_side, draw_box=False)
+    rvk = dict(overview_side=336, crop_side=336, draw_box=False)
+
+    def ref_view(r):
+        if r["label"] == "good":        # 정상 참고: 정답 마스크가 없으니 MMR이 의심할 부위를 같은 방식으로 자른다
+            return region_crop.views_from_map(r["path"], maps, region_kw=rk, **rvk)
+        return region_crop.views_from_mask(r["path"], region_kw=rk, **rvk)
+
+    ref_views = [ref_view(r) for r in refs]
+    view_fn = lambda path: region_crop.views_from_map(resolve(path), maps, region_kw=rk, **vk)
+
+    if a.dump_views:
+        vdir = os.path.join(a.out, "views_v10")
+        os.makedirs(vdir, exist_ok=True)
+        for i, (r, (ov, cr)) in enumerate(zip(refs, ref_views), 1):
+            ov.save(os.path.join(vdir, "ref_{:02d}_{}_{}_whole.jpg".format(i, r["condition"], r["label"])), quality=92)
+            cr.save(os.path.join(vdir, "ref_{:02d}_{}_{}_crop.jpg".format(i, r["condition"], r["label"])), quality=92)
+        for r in quick_subset(rows, a.dump_views, cond=lambda r: r["zone10"] in ("amb", "confident")):
+            ov, cr = view_fn(r["path"])
+            base = "q_{}_{}_{}".format(r["type"], r["domain"], os.path.basename(r["path"])[:-4])
+            ov.save(os.path.join(vdir, base + "_whole.jpg"), quality=92)
+            cr.save(os.path.join(vdir, base + "_crop.jpg"), quality=92)
+        print("저장: {} (전체 사진/크롭 쌍). 열어서 크롭이 의심 부위를 잘 담았는지 확인하세요.".format(vdir))
+        return
+
+    if a.step in ("all", "qwen"):
+        sel = lambda r: r["zone10"] in ("amb", "confident")
+        if a.quick:
+            sub = quick_subset(rows, a.quick, cond=sel)
+            fname = "qwen_quick_{}.jsonl".format(TAG)
+            run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, view_fn=view_fn, ref_views=ref_views,
+                     view_variant="v10", select=sel)
+            quick_report(sub, a.out, fname)
+            return
+        run_qwen(rows, a.out, a.limit, refs=refs, view_fn=view_fn, ref_views=ref_views, view_variant="v10", select=sel)
+    if a.step in ("all", "eval"):
+        v10 = {"t_normal": a.normal_thr}
+        print("\n===== 보고용 절반({}장)으로 평가 [임계값은 보정용 절반으로 정함] / normal 인정 기준 {} =====".format(len(report), a.normal_thr))
+        evaluate(report, a.out, v10=v10, out_suffix="_report")
+        print("\n(참고) 전체 {}장으로 평가한 결과는 results/comparison_{}_all.txt 에 저장됩니다. 임계값을 정한 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
+        evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mmr-out", default=os.path.join(MMR_DIR, "log_MMR_AeBAD_S_54"),
@@ -426,7 +535,7 @@ def main():
     p.add_argument("--out", default=os.path.join(HERE, "results"))
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
-    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6(짧은 원본+normal), v7(타입 특징 설명), v8(라벨 붙은 참고 이미지), v9(v8 + MMR 위치 박스/확대). 결과 파일 이름에 붙음")
+    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6, v7, v8(참고 이미지), v9(박스+확대), v10(이중 임계값 + 전체/크롭 + 정상 참고, 권장). 결과 파일 이름에 붙음")
     p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
     p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수. 제외 목록(holdout_manifest.csv)에 있는 만큼까지 사용 (지금은 그룹당 1장 = 12장)")
@@ -440,6 +549,12 @@ def main():
     p.add_argument("--no-cache", action="store_true", help="v8: 참고 이미지 캐시를 쓰지 않고 매번 전부 계산 (느림, 비교/확인용)")
     p.add_argument("--dump-views", type=int, default=None, metavar="N",
                    help="v9: 박스/확대 사진이 제대로 만들어지는지 눈으로 보기 위해 타입(정상 포함)별 N장을 results/views/ 에 저장하고 종료 (GPU 불필요)")
+    p.add_argument("--recall-target", type=float, default=0.98, help="v10: MMR 아래쪽 임계값을 정하는 재현율 목표 (기본 0.98). 높일수록 Qwen이 보는 이미지가 늘어남")
+    p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
+    p.add_argument("--normal-thr", type=float, default=0.80, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.80, 높을수록 불량으로 판정하는 이미지가 늘어남)")
+    p.add_argument("--crop-min", type=int, default=600, help="v10: 의심 부위 크롭의 최소 한 변(원본 픽셀)")
+    p.add_argument("--crop-max", type=int, default=900, help="v10: 의심 부위 크롭의 최대 한 변(원본 픽셀)")
+    p.add_argument("--crop-side", type=int, default=600, help="v10: Qwen에 넘기는 크롭 한 변(픽셀). 원본 크롭이 이보다 크면 이 크기로만 줄임")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -452,6 +567,11 @@ def main():
         if not os.path.exists(a.holdout):
             raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
+    if a.prompt == "v10":
+        if a.no_holdout:
+            raise SystemExit("v10은 holdout 15장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
+        run_v10(a, rows)
+        return
     if a.band_info:
         band_info(rows)
         return

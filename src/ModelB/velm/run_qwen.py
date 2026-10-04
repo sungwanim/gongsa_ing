@@ -510,12 +510,54 @@ Rules:
 """
 
 
-class CachedViewClassifier(CachedRefClassifier):
-    """참고 이미지(결함 위치 박스 + 확대)를 캐시해 두고, 검사 이미지는 (박스 전체 사진 + 확대 사진)로 판정."""
+V10_HEAD = """You are inspecting an aircraft engine blade.
 
-    def __init__(self, model, processor, refs, ref_views, view_fn):
-        # ref_views: refs 와 같은 순서의 [(전체+박스, 확대)] / view_fn(image_path) -> (전체+박스, 확대)
-        self.ref_views, self.view_fn = ref_views, view_fn
+Every blade is shown as TWO images: (1) the whole blade, and (2) a close-up crop of the region that an automatic anomaly detector found most suspicious. The crop is cut from the original photo at full resolution, with some surrounding context.
+First you will see labeled reference examples: DEFECTIVE blades (the crop shows the real defect) and NORMAL blades (the crop shows an ordinary region of a normal blade). Each example states how the photo was taken (different background, different lighting, or different camera view) and its label.
+The same defect type can look different under different conditions and on different blades, so learn what each defect looks like instead of matching exact pixels.
+"""
+
+V10_TAIL = """Now classify the inspection blade that follows into exactly ONE of the following five classes:
+
+{class_list}
+
+For the inspection blade the close-up region was chosen automatically. It can be a false alarm on a normal area, or it can miss the real defect, so look at BOTH images. Choose normal only if neither image shows any of the defects from the reference examples. Differences in brightness, color, reflection, shadow or background alone are not defects.
+
+Rules:
+1. Select exactly one class.
+2. Return only the class name.
+3. Do not provide an explanation.
+4. Do not return any class other than the five listed above.
+"""
+
+VIEW_PROMPTS = {
+    "v9": {
+        "head": V9_HEAD, "tail": V9_TAIL,
+        "ref_ov": "Reference example {i}: {cond}, defect = {label}. Whole blade with the red box:",
+        "ref_cr": "Close-up of the boxed region:",
+        "q_ov": "Inspection blade, whole blade with the red box:",
+        "q_cr": "Close-up of the boxed region:",
+    },
+    "v10": {
+        "head": V10_HEAD, "tail": V10_TAIL,
+        "ref_ov": "Reference example {i}: {cond}, label = {label}. Whole blade:",
+        "ref_cr": "Close-up crop of the suspicious region:",
+        "q_ov": "Inspection blade, whole blade:",
+        "q_cr": "Inspection blade, close-up crop of the suspicious region:",
+    },
+}
+
+
+def _label_text(label):
+    return "NORMAL (no defect)" if label in ("good", "normal") else label
+
+
+class CachedViewClassifier(CachedRefClassifier):
+    """참고 이미지(전체 사진 + 의심 부위 크롭)를 캐시해 두고, 검사 이미지도 (전체 사진 + 크롭) 두 장으로 판정."""
+
+    def __init__(self, model, processor, refs, ref_views, view_fn, variant="v9"):
+        # ref_views: refs 와 같은 순서의 [(전체 사진, 크롭)] / view_fn(image_path) -> (전체 사진, 크롭)
+        self.ref_views, self.view_fn, self.pv = ref_views, view_fn, VIEW_PROMPTS[variant]
         super().__init__(model, processor, refs, ref_max_pixels=None)
         self.n_ref_imgs = 2 * len(refs)
 
@@ -523,18 +565,19 @@ class CachedViewClassifier(CachedRefClassifier):
         return None
 
     def _build_inputs(self, image_path):
-        content = [{"type": "text", "text": V9_HEAD}]
+        P = self.pv
+        content = [{"type": "text", "text": P["head"]}]
         for i, (r, (ov, cr)) in enumerate(zip(self.refs, self.ref_views), 1):
-            content.append({"type": "text", "text": "Reference example {}: {}, defect = {}. Whole blade with the red box:".format(
-                i, CONDITION_TEXT.get(r["condition"], r["condition"]), r["label"])})
+            content.append({"type": "text", "text": P["ref_ov"].format(
+                i=i, cond=CONDITION_TEXT.get(r["condition"], r["condition"]), label=_label_text(r["label"]))})
             content.append({"type": "image", "image": ov})
-            content.append({"type": "text", "text": "Close-up of the boxed region:"})
+            content.append({"type": "text", "text": P["ref_cr"]})
             content.append({"type": "image", "image": cr})
-        content.append({"type": "text", "text": V9_TAIL.format(class_list="\n".join("- " + c for c in CLASSES))})
+        content.append({"type": "text", "text": P["tail"].format(class_list="\n".join("- " + c for c in CLASSES))})
         ov, cr = self.view_fn(image_path)
-        content.append({"type": "text", "text": "Inspection blade, whole blade with the red box:"})
+        content.append({"type": "text", "text": P["q_ov"]})
         content.append({"type": "image", "image": ov})
-        content.append({"type": "text", "text": "Close-up of the boxed region:"})
+        content.append({"type": "text", "text": P["q_cr"]})
         content.append({"type": "image", "image": cr})
         content.append({"type": "text", "text": "Answer with only the class name."})
         messages = [{"role": "user", "content": content}]
@@ -545,8 +588,8 @@ class CachedViewClassifier(CachedRefClassifier):
         return inputs.to(self.device)
 
     def _fallback(self, image_path):
-        # v9 는 캐시 없이 돌리는 방식을 지원하지 않는다 (다른 프롬프트로 조용히 바뀌는 것을 막기 위해 오류로 멈춘다)
-        raise RuntimeError("v9: 참고 이미지 캐시를 사용할 수 없어 중단합니다 (캐시 없이 전체 다시 계산하는 방식은 v9에서 지원하지 않음)")
+        # 캐시 없이 전부 다시 계산하는 방식은 지원하지 않는다 (다른 프롬프트로 조용히 바뀌는 것을 막기 위해 오류로 멈춘다)
+        raise RuntimeError("참고 이미지 캐시를 사용할 수 없어 중단합니다 (캐시 없이 전체 다시 계산하는 방식은 지원하지 않음)")
 
 
 # ============================================================

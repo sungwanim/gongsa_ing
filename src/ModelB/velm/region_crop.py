@@ -86,7 +86,7 @@ def box_from_mask(mask_path, width, height):
     return (xs.min() * sx, ys.min() * sy, (xs.max() + 1) * sx, (ys.max() + 1) * sy)
 
 
-def make_views(image_path, region_box=None, overview_side=504, crop_side=560):
+def make_views(image_path, region_box=None, overview_side=504, crop_side=560, draw_box=True):
     """(전체 사진 + 빨간 박스, 박스 부분 확대 사진). region_box 는 원본 좌표의 정사각형 영역.
     확대 사진은 원본에서 그대로 자르고, 영역이 crop_side보다 클 때만 그 크기로 줄인다."""
     img = Image.open(image_path).convert("RGB")
@@ -96,22 +96,23 @@ def make_views(image_path, region_box=None, overview_side=504, crop_side=560):
     if crop.size[0] > crop_side:
         crop = crop.resize((crop_side, crop_side), Image.LANCZOS)
     overview = img.resize((overview_side, overview_side), Image.LANCZOS)
-    d = ImageDraw.Draw(overview)
-    k = overview_side / float(w)
-    d.rectangle([left * k, top * k, right * k, bottom * k], outline=(255, 0, 0), width=4)
+    if draw_box:
+        d = ImageDraw.Draw(overview)
+        k = overview_side / float(w)
+        d.rectangle([left * k, top * k, right * k, bottom * k], outline=(255, 0, 0), width=4)
     return overview, crop
 
 
-def views_from_map(image_path, map_index, **kw):
-    """검사 이미지: MMR 이상 맵으로 영역을 정한다."""
+def views_from_map(image_path, map_index, region_kw=None, **kw):
+    """검사 이미지: MMR 이상 맵으로 영역을 정한다. region_kw: square_region 인자(주변 맥락 크기 등)."""
     w, h = Image.open(image_path).size
     box = map_box_to_original(bbox_from_map(map_index.get(image_path)), w, h)
-    return make_views(image_path, square_region(box, w, h), **kw)
+    return make_views(image_path, square_region(box, w, h, **(region_kw or {})), **kw)
 
 
-def views_from_mask(image_path, **kw):
+def views_from_mask(image_path, region_kw=None, **kw):
     """참고 이미지: 정답 마스크로 영역을 정한다. (test -> ground_truth 폴더, 같은 파일 이름)"""
     mask_path = image_path.replace("/test/", "/ground_truth/")
     w, h = Image.open(image_path).size
     box = box_from_mask(mask_path, w, h)
-    return make_views(image_path, square_region(box, w, h), **kw)
+    return make_views(image_path, square_region(box, w, h, **(region_kw or {})), **kw)

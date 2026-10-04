@@ -3,14 +3,11 @@ background,ablation,AeBAD/AeBAD_S/test/ablation/background/IMG_8840.png
 background,breakdown,AeBAD/AeBAD_S/test/breakdown/background/IMG_9261.png
 background,fracture,AeBAD/AeBAD_S/test/fracture/background/IMG_9338.png
 background,groove,AeBAD/AeBAD_S/test/groove/background/IMG_8397.png
-background,good,AeBAD/AeBAD_S/test/good/background/IMG_7728.png
 illumination,ablation,AeBAD/AeBAD_S/test/ablation/illumination/IMG_8885.png
 illumination,breakdown,AeBAD/AeBAD_S/test/breakdown/illumination/IMG_9180.png
 illumination,fracture,AeBAD/AeBAD_S/test/fracture/illumination/IMG_9701.png
 illumination,groove,AeBAD/AeBAD_S/test/groove/illumination/IMG_8463.png
-illumination,good,AeBAD/AeBAD_S/test/good/illumination/IMG_7700.png
 view,ablation,AeBAD/AeBAD_S/test/ablation/view/IMG_8790.png
 view,breakdown,AeBAD/AeBAD_S/test/breakdown/view/IMG_9086.png
 view,fracture,AeBAD/AeBAD_S/test/fracture/view/IMG_9624.png
 view,groove,AeBAD/AeBAD_S/test/groove/view/IMG_8329.png
-view,good,AeBAD/AeBAD_S/test/good/view/IMG_7631.png
