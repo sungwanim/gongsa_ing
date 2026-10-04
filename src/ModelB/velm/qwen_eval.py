@@ -130,7 +130,7 @@ def band_info(rows):
     print("\n(참고) 구간이 넓을수록 Qwen이 볼 이미지가 많아집니다. 이 숫자를 보고 --band-pct N 을 정하세요.")
 
 
-def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True):
+def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True, view_fn=None, ref_views=None):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
     fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
     done = set()
@@ -146,7 +146,10 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
         return
     model, processor = load_model()
     clf = None
-    if refs and use_cache:
+    if view_fn is not None:
+        from run_qwen import CachedViewClassifier
+        clf = CachedViewClassifier(model, processor, refs, ref_views, view_fn)
+    elif refs and use_cache:
         from run_qwen import CachedRefClassifier
         clf = CachedRefClassifier(model, processor, refs, ref_px)
     with open(fpath, "a") as f:
@@ -423,7 +426,7 @@ def main():
     p.add_argument("--out", default=os.path.join(HERE, "results"))
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
-    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6(짧은 원본+normal), v7(타입 특징 설명), v8(라벨 붙은 참고 이미지 60장). 결과 파일 이름에 붙음")
+    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6(짧은 원본+normal), v7(타입 특징 설명), v8(라벨 붙은 참고 이미지), v9(v8 + MMR 위치 박스/확대). 결과 파일 이름에 붙음")
     p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
     p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수. 제외 목록(holdout_manifest.csv)에 있는 만큼까지 사용 (지금은 그룹당 1장 = 12장)")
@@ -435,6 +438,8 @@ def main():
     p.add_argument("--sweep-normal", action="store_true", help="저장된 확률로 normal 확률 기준값(t)을 바꿔 가며 정확도/재현율/F1/타입 맞힘을 표로 출력 (GPU 불필요)")
     p.add_argument("--band-info", action="store_true", help="MMR 점수 분포와 N%%별 애매한 이미지 수를 출력하고 종료 (GPU 불필요)")
     p.add_argument("--no-cache", action="store_true", help="v8: 참고 이미지 캐시를 쓰지 않고 매번 전부 계산 (느림, 비교/확인용)")
+    p.add_argument("--dump-views", type=int, default=None, metavar="N",
+                   help="v9: 박스/확대 사진이 제대로 만들어지는지 눈으로 보기 위해 타입(정상 포함)별 N장을 results/views/ 에 저장하고 종료 (GPU 불필요)")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -464,7 +469,8 @@ def main():
         compare_all(rows, a.out, [t.strip() for t in a.compare.split(",") if t.strip()])
         return
     refs = ref_px = None
-    if a.prompt == "v8":
+    view_fn = ref_views = None
+    if a.prompt in ("v8", "v9"):
         if a.no_holdout:
             raise SystemExit("v8은 holdout 60장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
         refs = build_refs(a.holdout, a.ref_per_group)
@@ -475,8 +481,27 @@ def main():
             suffix += "_n{}".format(len(refs))
         if a.ref_px != 128:
             suffix += "_p{}".format(a.ref_px)
+        if a.prompt == "v9":
+            import region_crop
+            maps = region_crop.MapIndex(a.mmr_out)
+            print("이상 맵 {}장 로드, 참고 이미지 {}장의 위치는 정답 마스크로 계산".format(len(maps.maps), len(refs)), flush=True)
+            ref_views = [region_crop.views_from_mask(r["path"]) for r in refs]
+            view_fn = lambda path: region_crop.views_from_map(resolve(path), maps)
+        if a.dump_views and a.prompt == "v9":
+            vdir = os.path.join(a.out, "views")
+            os.makedirs(vdir, exist_ok=True)
+            for i, (r, (ov, cr)) in enumerate(zip(refs, ref_views), 1):
+                ov.save(os.path.join(vdir, "ref_{:02d}_{}_{}_box.jpg".format(i, r["condition"], r["label"])), quality=92)
+                cr.save(os.path.join(vdir, "ref_{:02d}_{}_{}_crop.jpg".format(i, r["condition"], r["label"])), quality=92)
+            for r in quick_subset(rows, a.dump_views):
+                ov, cr = view_fn(r["path"])
+                base = "q_{}_{}_{}".format(r["type"], r["domain"], os.path.basename(r["path"])[:-4])
+                ov.save(os.path.join(vdir, base + "_box.jpg"), quality=92)
+                cr.save(os.path.join(vdir, base + "_crop.jpg"), quality=92)
+            print("저장: {} (참고 이미지 {}장 x 2, 검사 이미지 타입별 {}장 x 2). 열어서 박스가 결함 위치에 있는지 확인하세요.".format(vdir, len(refs), a.dump_views))
+            return
         if suffix:
-            TAG = "v8" + suffix
+            TAG = a.prompt + suffix
             print("결과 파일 이름에 붙는 이름: {}".format(TAG), flush=True)
         # 안전장치: 판정 대상에 참고 이미지가 하나라도 남아 있으면 중단
         ref_keys = {(r["condition"], r["label"], os.path.basename(r["path"])) for r in refs}
@@ -487,11 +512,11 @@ def main():
     if a.quick:
         sub = quick_subset(rows, a.quick)
         fname = "qwen_quick_{}.jsonl".format(TAG)
-        run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, ref_px=ref_px, use_cache=not a.no_cache)
+        run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, ref_px=ref_px, use_cache=not a.no_cache, view_fn=view_fn, ref_views=ref_views)
         quick_report(sub, a.out, fname)
         return
     if a.step in ("all", "qwen"):
-        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px, use_cache=not a.no_cache)
+        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px, use_cache=not a.no_cache, view_fn=view_fn, ref_views=ref_views)
     if a.step in ("all", "eval"):
         evaluate(rows, a.out, band_pct=a.band_pct)
 

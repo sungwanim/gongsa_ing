@@ -361,6 +361,7 @@ class CachedRefClassifier:
         self.model, self.processor = model, processor
         self.refs, self.ref_max_pixels = refs, ref_max_pixels
         self.n_ref = len(refs)
+        self.n_ref_imgs = len(refs)          # 참고 부분의 이미지 장수 (v9는 참고 하나당 2장)
         self.device = next(p.device for p in model.parameters() if p.device.type != "meta")
         self.vision_start = model.config.vision_start_token_id
         self.state = "untested"          # untested -> on / off
@@ -402,18 +403,18 @@ class CachedRefClassifier:
         mm = inputs["mm_token_type_ids"]                              # 프로세서가 같이 돌려줌 (글자 0 / 이미지 1)
         mask = torch.ones_like(ids)
         pos = self._rope(ids, grid, mask, mm)
-        L = int((ids[0] == self.vision_start).nonzero()[-1])         # 마지막 이미지(검사 이미지) 시작 위치
+        L = int((ids[0] == self.vision_start).nonzero()[self.n_ref_imgs])   # 첫 번째 검사 이미지가 시작하는 위치
         with torch.no_grad():
             if self.cache is None:                                    # 참고 이미지 부분: 처음 한 번만 계산
-                self.n_ref_patch = int(grid[:self.n_ref].prod(-1).sum())
+                self.n_ref_patch = int(grid[:self.n_ref_imgs].prod(-1).sum())
                 out = self.model(input_ids=ids[:, :L], attention_mask=mask[:, :L],
-                                 pixel_values=pv[:self.n_ref_patch], image_grid_thw=grid[:self.n_ref],
+                                 pixel_values=pv[:self.n_ref_patch], image_grid_thw=grid[:self.n_ref_imgs],
                                  position_ids=pos[:, :, :L], use_cache=True, logits_to_keep=1)
                 self.cache, self.prefix_ids, self.L = out.past_key_values, ids[:, :L].clone(), L
             elif L != self.L or not torch.equal(ids[:, :L], self.prefix_ids):
                 raise RuntimeError("참고 이미지 부분이 이전과 달라 캐시를 쓸 수 없습니다")
             out = self.model(input_ids=ids[:, L:], attention_mask=mask,
-                             pixel_values=pv[self.n_ref_patch:], image_grid_thw=grid[self.n_ref:],
+                             pixel_values=pv[self.n_ref_patch:], image_grid_thw=grid[self.n_ref_imgs:],
                              position_ids=pos[:, :, L:], past_key_values=self.cache,
                              use_cache=True, logits_to_keep=1)
         self.cache.crop(self.L)                                       # 검사 이미지 부분은 지우고 참고 이미지 부분만 남김
@@ -481,6 +482,71 @@ class CachedRefClassifier:
                 pass
             print("[캐시 사용 불가] {}: {} -> 기존 방식(전부 다시 계산)으로 진행".format(type(e).__name__, str(e)[:800]), flush=True)
             return self._fallback(image_path)
+
+
+# ============================================================
+# v9: MMR이 찾은 위치를 (빨간 박스가 있는 전체 사진 + 원본 해상도로 자른 확대 사진) 두 장으로 보여 주는 방식
+#     참고 이미지도 같은 방식(정답 마스크 위치). 참고 이미지 부분은 캐시로 한 번만 계산.
+# ============================================================
+
+V9_HEAD = """You are inspecting an aircraft engine blade.
+
+Every picture of a blade is shown as TWO images: (1) the whole blade with a red box, and (2) a close-up of the boxed region at original resolution.
+First you will see labeled reference examples of DEFECTIVE blades. In the examples the red box marks the real defect, and the example states how the photo was taken (different background, different lighting, or different camera view) and which defect it shows.
+The same defect type can look different under different conditions and on different blades, so learn what each defect looks like instead of matching exact pixels.
+"""
+
+V9_TAIL = """Now classify the inspection blade that follows into exactly ONE of the following five classes:
+
+{class_list}
+
+For the inspection blade, the red box was placed by an automatic anomaly detector. It may mark a real defect, but it can also be a false alarm on a normal area. normal means the blade has none of the defects shown in the reference examples. Differences in brightness, color, reflection, shadow or background alone are not defects.
+
+Rules:
+1. Select exactly one class.
+2. Return only the class name.
+3. Do not provide an explanation.
+4. Do not return any class other than the five listed above.
+"""
+
+
+class CachedViewClassifier(CachedRefClassifier):
+    """참고 이미지(결함 위치 박스 + 확대)를 캐시해 두고, 검사 이미지는 (박스 전체 사진 + 확대 사진)로 판정."""
+
+    def __init__(self, model, processor, refs, ref_views, view_fn):
+        # ref_views: refs 와 같은 순서의 [(전체+박스, 확대)] / view_fn(image_path) -> (전체+박스, 확대)
+        self.ref_views, self.view_fn = ref_views, view_fn
+        super().__init__(model, processor, refs, ref_max_pixels=None)
+        self.n_ref_imgs = 2 * len(refs)
+
+    def _load_ref_images(self):
+        return None
+
+    def _build_inputs(self, image_path):
+        content = [{"type": "text", "text": V9_HEAD}]
+        for i, (r, (ov, cr)) in enumerate(zip(self.refs, self.ref_views), 1):
+            content.append({"type": "text", "text": "Reference example {}: {}, defect = {}. Whole blade with the red box:".format(
+                i, CONDITION_TEXT.get(r["condition"], r["condition"]), r["label"])})
+            content.append({"type": "image", "image": ov})
+            content.append({"type": "text", "text": "Close-up of the boxed region:"})
+            content.append({"type": "image", "image": cr})
+        content.append({"type": "text", "text": V9_TAIL.format(class_list="\n".join("- " + c for c in CLASSES))})
+        ov, cr = self.view_fn(image_path)
+        content.append({"type": "text", "text": "Inspection blade, whole blade with the red box:"})
+        content.append({"type": "image", "image": ov})
+        content.append({"type": "text", "text": "Close-up of the boxed region:"})
+        content.append({"type": "image", "image": cr})
+        content.append({"type": "text", "text": "Answer with only the class name."})
+        messages = [{"role": "user", "content": content}]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs,
+                                padding=True, return_tensors="pt")
+        return inputs.to(self.device)
+
+    def _fallback(self, image_path):
+        # v9 는 캐시 없이 돌리는 방식을 지원하지 않는다 (다른 프롬프트로 조용히 바뀌는 것을 막기 위해 오류로 멈춘다)
+        raise RuntimeError("v9: 참고 이미지 캐시를 사용할 수 없어 중단합니다 (캐시 없이 전체 다시 계산하는 방식은 v9에서 지원하지 않음)")
 
 
 # ============================================================
