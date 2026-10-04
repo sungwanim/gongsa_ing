@@ -91,7 +91,7 @@ def key(r):
     return r["domain"] + "|" + r["path"]
 
 
-def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None):
+def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
     fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
     done = set()
@@ -105,10 +105,17 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
     if not todo:
         return
     model, processor = load_model()
+    clf = None
+    if refs and use_cache:
+        from run_qwen import CachedRefClassifier
+        clf = CachedRefClassifier(model, processor, refs, ref_px)
     with open(fpath, "a") as f:
         for n, r in enumerate(todo, 1):
             try:
-                out = classify_image(resolve(r["path"]), model, processor, prompt=TAG, refs=refs, ref_max_pixels=ref_px)
+                if clf is not None:
+                    out = clf.classify(resolve(r["path"]))
+                else:
+                    out = classify_image(resolve(r["path"]), model, processor, prompt=TAG, refs=refs, ref_max_pixels=ref_px)
             except Exception as e:
                 out = {"label": "unknown", "confidence": 0.0, "probs": {}, "class_mass": 0.0, "raw": "ERROR: {}".format(e)}
             f.write(json.dumps({"key": key(r), "raw": out["raw"], "pred_type": out["label"],
@@ -116,6 +123,8 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
                                 "class_mass": out["class_mass"]}, ensure_ascii=False) + "\n")
             f.flush()
             print("[{}/{}] {} -> {} ({:.1%})".format(n, len(todo), os.path.basename(r["path"]), out["label"], out["confidence"]), flush=True)
+    if clf is not None:
+        print("캐시 사용 {}장 / 전체 다시 계산 {}장 (캐시 상태: {})".format(clf.n_cached, clf.n_fallback, clf.state), flush=True)
 
 
 def quick_subset(rows, n):
@@ -307,6 +316,7 @@ def main():
     p.add_argument("--ref-px", type=int, default=128, help="v8: 참고 이미지 한 장당 토큰 수 (128이면 약 128*28*28 화소). 메모리 부족이면 줄이기")
     p.add_argument("--compare", default=None, metavar="TAGS",
                    help="저장된 결과로 MMR 단독 + 여러 프롬프트를 한 표로 비교. 예: v6,v7,v8")
+    p.add_argument("--no-cache", action="store_true", help="v8: 참고 이미지 캐시를 쓰지 않고 매번 전부 계산 (느림, 비교/확인용)")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -337,11 +347,11 @@ def main():
     if a.quick:
         sub = quick_subset(rows, a.quick)
         fname = "qwen_quick_{}.jsonl".format(TAG)
-        run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, ref_px=ref_px)
+        run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, ref_px=ref_px, use_cache=not a.no_cache)
         quick_report(sub, a.out, fname)
         return
     if a.step in ("all", "qwen"):
-        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px)
+        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px, use_cache=not a.no_cache)
     if a.step in ("all", "eval"):
         evaluate(rows, a.out)
 

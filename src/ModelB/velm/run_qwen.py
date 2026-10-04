@@ -158,7 +158,7 @@ CONDITION_TEXT = {
 }
 
 
-def build_ref_content(refs, ref_max_pixels):
+def build_ref_content(refs, ref_max_pixels, images=None):
     """refs: [{"path", "label", "condition"}]  ->  메시지 content 조각 리스트"""
     content = [{"type": "text", "text": V8_HEAD}]
     for i, r in enumerate(refs, 1):
@@ -167,9 +167,12 @@ def build_ref_content(refs, ref_max_pixels):
             "text": "Reference example {}: {}, defect = {}".format(
                 i, CONDITION_TEXT.get(r["condition"], r["condition"]), r["label"]),
         })
-        item = {"type": "image", "image": r["path"]}
-        if ref_max_pixels:
-            item["max_pixels"] = ref_max_pixels      # 예시 이미지는 작게 (토큰/메모리 절약)
+        if images is not None:
+            item = {"type": "image", "image": images[i - 1]}     # 미리 줄여 둔 PIL 이미지 (매번 디스크에서 읽지 않음)
+        else:
+            item = {"type": "image", "image": r["path"]}
+            if ref_max_pixels:
+                item["max_pixels"] = ref_max_pixels      # 예시 이미지는 작게 (토큰/메모리 절약)
         content.append(item)
     content.append({"type": "text", "text": V8_TAIL.format(class_list="\n".join("- " + c for c in CLASSES))})
     content.append({"type": "text", "text": "Inspection image:"})
@@ -322,6 +325,130 @@ def classify_image(image_path, model, processor, prompt="v6", refs=None, ref_max
         "class_mass": mass,
         "raw": raw,
     }
+
+
+# ============================================================
+# v8 속도 개선: 참고 이미지 60장은 처음 한 번만 계산(KV cache)하고, 이후 검사 이미지마다 새 부분만 계산
+#  - 처음 한 장은 "전부 다시 계산한 결과"와 비교해서 같을 때만 캐시를 사용 (다르거나 에러가 나면 기존 방식으로 자동 전환)
+# ============================================================
+
+def _result_from_logits(first_logits, processor):
+    """첫 토큰 로짓 -> classify_image 와 같은 형식의 결과 (확신도 계산 방식도 동일)"""
+    tok = processor.tokenizer
+    label_ids = _label_first_token_ids(processor)
+    log_probs = torch.log_softmax(first_logits.float(), dim=-1)
+    top_id = int(torch.argmax(log_probs))
+    raw = tok.decode([top_id]).strip().lower()
+    label = validate_result(raw)
+    class_prob = {
+        name: torch.logsumexp(log_probs[id_list], dim=0).exp().item()
+        for name, id_list in label_ids.items()
+    }
+    mass = sum(class_prob.values())
+    probs = {name: p / mass for name, p in class_prob.items()} if mass > 0 else class_prob
+    return {"label": label, "confidence": probs.get(label, 0.0), "probs": probs,
+            "class_mass": mass, "raw": raw}
+
+
+class CachedRefClassifier:
+
+    def __init__(self, model, processor, refs, ref_max_pixels):
+        self.model, self.processor = model, processor
+        self.refs, self.ref_max_pixels = refs, ref_max_pixels
+        self.n_ref = len(refs)
+        self.device = next(p.device for p in model.parameters() if p.device.type != "meta")
+        self.vision_start = model.config.vision_start_token_id
+        self.state = "untested"          # untested -> on / off
+        self.cache = self.prefix_ids = self.L = self.n_ref_patch = None
+        self.n_cached = self.n_fallback = 0
+        self.ref_images = self._load_ref_images()
+
+    def _load_ref_images(self):
+        from PIL import Image
+        images = []
+        for r in self.refs:
+            try:
+                from qwen_vl_utils.vision_process import fetch_image
+                images.append(fetch_image({"image": r["path"], "max_pixels": self.ref_max_pixels}))
+            except Exception:
+                images.append(Image.open(r["path"]).convert("RGB"))
+        return images
+
+    def _build_inputs(self, image_path):
+        content = build_ref_content(self.refs, self.ref_max_pixels, images=self.ref_images)
+        content.append({"type": "image", "image": image_path})
+        content.append({"type": "text", "text": "Answer with only the class name."})
+        messages = [{"role": "user", "content": content}]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs,
+                                padding=True, return_tensors="pt")
+        return inputs.to(self.device)
+
+    def _rope(self, ids, grid, mask):
+        fn = getattr(self.model, "get_rope_index", None) or getattr(self.model.model, "get_rope_index")
+        out = fn(input_ids=ids, image_grid_thw=grid, video_grid_thw=None, attention_mask=mask)
+        return out[0] if isinstance(out, tuple) else out
+
+    def _cached_logits(self, inputs):
+        ids, grid, pv = inputs["input_ids"], inputs["image_grid_thw"], inputs["pixel_values"]
+        T = ids.shape[1]
+        mask = torch.ones_like(ids)
+        pos = self._rope(ids, grid, mask)
+        L = int((ids[0] == self.vision_start).nonzero()[-1])         # 마지막 이미지(검사 이미지) 시작 위치
+        with torch.no_grad():
+            if self.cache is None:                                    # 참고 이미지 부분: 처음 한 번만 계산
+                self.n_ref_patch = int(grid[:self.n_ref].prod(-1).sum())
+                out = self.model(input_ids=ids[:, :L], attention_mask=mask[:, :L],
+                                 pixel_values=pv[:self.n_ref_patch], image_grid_thw=grid[:self.n_ref],
+                                 position_ids=pos[:, :, :L], use_cache=True)
+                self.cache, self.prefix_ids, self.L = out.past_key_values, ids[:, :L].clone(), L
+            elif L != self.L or not torch.equal(ids[:, :L], self.prefix_ids):
+                raise RuntimeError("참고 이미지 부분이 이전과 달라 캐시를 쓸 수 없습니다")
+            out = self.model(input_ids=ids[:, L:], attention_mask=mask,
+                             pixel_values=pv[self.n_ref_patch:], image_grid_thw=grid[self.n_ref:],
+                             position_ids=pos[:, :, L:], past_key_values=self.cache,
+                             cache_position=torch.arange(L, T, device=self.device), use_cache=True)
+        self.cache.crop(self.L)                                       # 검사 이미지 부분은 지우고 참고 이미지 부분만 남김
+        return out.logits[0, -1].float()
+
+    def _full_logits(self, inputs):
+        with torch.no_grad():
+            out = self.model(**inputs, logits_to_keep=1)
+        return out.logits[0, -1].float()
+
+    def _fallback(self, image_path):
+        self.n_fallback += 1
+        return classify_image(image_path, self.model, self.processor, prompt="v8",
+                              refs=self.refs, ref_max_pixels=self.ref_max_pixels)
+
+    def classify(self, image_path):
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {image_path}")
+        if self.state == "off":
+            return self._fallback(image_path)
+        try:
+            inputs = self._build_inputs(image_path)
+            cached = self._cached_logits(inputs)
+            if self.state == "untested":                              # 처음 한 장: 전부 다시 계산한 결과와 비교
+                full = self._full_logits(inputs)
+                ids = sorted({t for v in _label_first_token_ids(self.processor).values() for t in v})
+                lc, lf = torch.log_softmax(cached, -1), torch.log_softmax(full, -1)
+                diff = float((lc[ids] - lf[ids]).abs().max())
+                same_top = int(torch.argmax(cached)) == int(torch.argmax(full))
+                if same_top and diff < 0.3:
+                    self.state = "on"
+                    print("[캐시 확인 통과] 전체 계산과 결과 일치 (클래스 로그확률 최대 차이 {:.3f}) -> 참고 이미지 캐시 사용".format(diff), flush=True)
+                else:
+                    self.state = "off"
+                    print("[캐시 확인 실패] 전체 계산과 결과가 다릅니다 (top1 같음={}, 최대 차이 {:.3f}) -> 기존 방식으로 진행".format(same_top, diff), flush=True)
+                    return self._fallback(image_path)
+            self.n_cached += 1
+            return _result_from_logits(cached, self.processor)
+        except Exception as e:
+            self.state = "off"
+            print("[캐시 사용 불가] {}: {} -> 기존 방식(전부 다시 계산)으로 진행".format(type(e).__name__, str(e)[:200]), flush=True)
+            return self._fallback(image_path)
 
 
 # ============================================================
