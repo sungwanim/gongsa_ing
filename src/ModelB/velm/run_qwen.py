@@ -419,10 +419,21 @@ class CachedRefClassifier:
             out = self.model(**inputs, logits_to_keep=1)
         return out.logits[0, -1].float()
 
+    def _free(self):
+        """캐시와 임시 메모리를 비운다."""
+        import gc
+        self.cache = self.prefix_ids = self.L = self.n_ref_patch = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def _fallback(self, image_path):
         self.n_fallback += 1
         return classify_image(image_path, self.model, self.processor, prompt="v8",
                               refs=self.refs, ref_max_pixels=self.ref_max_pixels)
+
+    def _mem(self):
+        return "{:.2f} GiB / 최대 {:.2f} GiB (GPU 조각 전체 16 GiB)".format(
+            torch.cuda.memory_allocated() / 1024 ** 3, torch.cuda.max_memory_allocated() / 1024 ** 3)
 
     def classify(self, image_path):
         if not os.path.isfile(image_path):
@@ -431,30 +442,36 @@ class CachedRefClassifier:
             return self._fallback(image_path)
         try:
             inputs = self._build_inputs(image_path)
-            cached = self._cached_logits(inputs)
-            if self.state == "untested":                              # 처음 한 장: 전부 다시 계산한 결과와 비교
+            if self.state == "untested":
+                # 처음 한 장: (1) 전부 계산 -> 메모리 비움 -> (2) 캐시 계산. 두 계산이 메모리에서 겹치지 않게 순서대로 한다.
                 full = self._full_logits(inputs)
-                ids = sorted({t for v in _label_first_token_ids(self.processor).values() for t in v})
-                lc, lf = torch.log_softmax(cached, -1), torch.log_softmax(full, -1)
-                diff = float((lc[ids] - lf[ids]).abs().max())
-                same_top = int(torch.argmax(cached)) == int(torch.argmax(full))
-                if same_top and diff < 0.3:
+                rf = _result_from_logits(full, self.processor)
+                torch.cuda.empty_cache()
+                cached = self._cached_logits(inputs)
+                rc = _result_from_logits(cached, self.processor)
+                diff = max(abs(rc["probs"][k] - rf["probs"][k]) for k in rf["probs"])
+                same_top = rc["label"] == rf["label"]
+                fmt = lambda r: {k: round(v, 3) for k, v in r["probs"].items()}
+                if same_top and diff < 0.15:
                     self.state = "on"
-                    print("[캐시 확인 통과] 전체 계산과 결과 일치 (클래스 로그확률 최대 차이 {:.3f}) -> 참고 이미지 캐시 사용".format(diff), flush=True)
+                    print("[캐시 확인 통과] 전체 계산과 같은 답({}), 클래스 확률 최대 차이 {:.3f} -> 참고 이미지 캐시 사용".format(rf["label"], diff), flush=True)
+                    print("[메모리] 우리 프로세스 현재 {}".format(self._mem()), flush=True)
                 else:
                     self.state = "off"
-                    print("[캐시 확인 실패] 전체 계산과 결과가 다릅니다 (top1 같음={}, 최대 차이 {:.3f}) -> 기존 방식으로 진행".format(same_top, diff), flush=True)
-                    return self._fallback(image_path)
+                    print("[캐시 확인 실패] 같은 답={}, 클래스 확률 최대 차이 {:.3f}\n  전체 계산: {}\n  캐시 계산: {}\n  -> 기존 방식으로 진행".format(
+                        same_top, diff, fmt(rf), fmt(rc)), flush=True)
+                    self._free()
+                return rf          # 첫 장은 전체 계산 결과를 사용 (가장 믿을 수 있는 값)
+            cached = self._cached_logits(inputs)
             self.n_cached += 1
-            if self.n_cached in (1, 5):
-                print("[메모리] 우리 프로세스 현재 {:.2f} GiB / 최대 {:.2f} GiB (GPU 조각 전체 16 GiB)".format(
-                    torch.cuda.memory_allocated() / 1024 ** 3, torch.cuda.max_memory_allocated() / 1024 ** 3), flush=True)
+            if self.n_cached == 5:
+                print("[메모리] 우리 프로세스 현재 {}".format(self._mem()), flush=True)
             return _result_from_logits(cached, self.processor)
         except Exception as e:
             self.state = "off"
+            self._free()
             try:
-                print("[메모리] 실패 시점 우리 프로세스 현재 {:.2f} GiB / 최대 {:.2f} GiB (GPU 조각 전체 16 GiB)".format(
-                    torch.cuda.memory_allocated() / 1024 ** 3, torch.cuda.max_memory_allocated() / 1024 ** 3), flush=True)
+                print("[메모리] 실패 시점 우리 프로세스 {}".format(self._mem()), flush=True)
             except Exception:
                 pass
             print("[캐시 사용 불가] {}: {} -> 기존 방식(전부 다시 계산)으로 진행".format(type(e).__name__, str(e)[:800]), flush=True)

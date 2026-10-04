@@ -15,6 +15,7 @@ import os
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   # GPU 메모리 조각 낭비 줄이기
 HERE = os.path.dirname(os.path.abspath(__file__))
 MMR_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "ModelA", "MMR_Test"))
 TYPES = ["ablation", "breakdown", "fracture", "groove"]
