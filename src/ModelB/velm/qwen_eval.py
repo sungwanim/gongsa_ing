@@ -245,6 +245,8 @@ def quick_diag(sub, out_dir, fname):
        1) normal 확률로 불량/정상을 얼마나 가르는가 (AUROC)  2) normal을 빼고 4개 중에서만 고르면 타입을 얼마나 맞히는가
        3) normal 확률 기준 t별 재현율/오탐"""
     from sklearn.metrics import roc_auc_score
+    L = []
+    P = L.append
     res = {}
     with open(os.path.join(out_dir, fname)) as f:
         for l in f:
@@ -256,8 +258,8 @@ def quick_diag(sub, out_dir, fname):
     if len(set(x[1] for x in data)) < 2:
         return
     y = [x[1] for x in data]; s = [1 - x[2]["normal"] for x in data]
-    print("[진단] 장수 {} | 불량/정상 구분 AUROC(1-normal확률) = {:.3f}   (참고: v8 0.943)".format(len(data), roc_auc_score(y, s)))
-    print("\n[진단] normal을 빼고 4개 중에서만 고르면 (불량만)")
+    P("[진단] 장수 {} | 불량/정상 구분 AUROC(1-normal확률) = {:.3f}   (참고: v8 0.943)".format(len(data), roc_auc_score(y, s)))
+    P("\n[진단] normal을 빼고 4개 중에서만 고르면 (불량만)")
     tot = ok_all = 0
     for t in DEF4:
         xs = [x for x in data if x[0] == t]
@@ -265,14 +267,18 @@ def quick_diag(sub, out_dir, fname):
             continue
         pick = {k: sum(1 for x in xs if max(DEF4, key=lambda c: x[2][c]) == k) for k in DEF4}
         ok = pick[t]; tot += len(xs); ok_all += ok
-        print("  {:>10}: {:>2}/{:<2} 맞힘 | 고른 분포 {}".format(t, ok, len(xs), pick))
-    print("  {:>10}: {}/{} ({:.0%})".format("전체", ok_all, tot, ok_all / max(tot, 1)))
-    print("\n[진단] normal 확률 기준 t별: 불량을 불량으로 보는 비율(재현율) / 정상을 불량으로 보는 비율(FPR)")
+        P("  {:>10}: {:>2}/{:<2} 맞힘 | 고른 분포 {}".format(t, ok, len(xs), pick))
+    P("  {:>10}: {}/{} ({:.0%})".format("전체", ok_all, tot, ok_all / max(tot, 1)))
+    P("\n[진단] normal 확률 기준 t별: 불량을 불량으로 보는 비율(재현율) / 정상을 불량으로 보는 비율(FPR)")
     for t in (0.5, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99):
         nd = max(1, sum(1 for x in data if x[1] == 1)); nn = max(1, sum(1 for x in data if x[1] == 0))
         rec = sum(1 for x in data if x[1] == 1 and x[2]["normal"] < t) / nd
         fpr = sum(1 for x in data if x[1] == 0 and x[2]["normal"] < t) / nn
-        print("  t={:.2f}: 재현율 {:.0%}, FPR {:.0%}".format(t, rec, fpr))
+        P("  t={:.2f}: 재현율 {:.0%}, FPR {:.0%}".format(t, rec, fpr))
+    text = "\n".join(L) + "\n"
+    print(text)
+    with open(os.path.join(out_dir, "quick_diag_{}.txt".format(TAG)), "w") as f:
+        f.write(text)
 
 
 def metrics(y, pred, score=None):
