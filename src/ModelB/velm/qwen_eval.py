@@ -18,6 +18,7 @@ from sklearn.metrics import roc_auc_score
 HERE = os.path.dirname(os.path.abspath(__file__))
 MMR_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "ModelA", "MMR_Test"))
 TYPES = ["ablation", "breakdown", "fracture", "groove"]
+HOLDOUT = os.path.join(HERE, "holdout_manifest.csv")   # 평가에서 제외할 60장 (test 이미지 중 따로 뺀 것)
 TAG = "v6"      # 프롬프트 이름 (결과 파일 이름에 붙음, --prompt 로 변경)
 
 
@@ -32,10 +33,29 @@ def load_mmr_csv(mmr_out):
             for r in csv.DictReader(fh):
                 p = r["image_path"].replace("\\", "/").split("/")
                 anomaly = p[p.index("test") + 1] if "test" in p else "unknown"
-                rows.append({"domain": domain, "path": r["image_path"], "label": int(float(r["label"])),
+                rows.append({"domain": domain, "path": r["image_path"], "folder_type": anomaly, "label": int(float(r["label"])),
                              "score": float(r["score"]), "pred": int(float(r["prediction"])),
                              "type": "good" if int(float(r["label"])) == 0 else anomaly})
     return rows
+
+
+def load_holdout(path):
+    s = set()
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            s.add((r["domain"], r["defect"], os.path.basename(r["original_path"])))
+    return s
+
+
+def apply_holdout(rows, path):
+    """제외 목록(도메인, 폴더의 결함 타입, 파일 이름)에 있는 이미지를 평가 대상에서 뺀다. 데이터 파일은 지우지 않는다."""
+    hold = load_holdout(path)
+    kept = [r for r in rows if (r["domain"], r["folder_type"], os.path.basename(r["path"])) not in hold]
+    removed = len(rows) - len(kept)
+    print("제외 목록 {}장 중 평가 대상에서 뺀 이미지 {}장 (남은 {}장)".format(len(hold), removed, len(kept)))
+    if removed != len(hold):
+        print("[경고] 제외 목록과 MMR 결과가 {}장 맞지 않습니다. 파일 이름/도메인을 확인하세요.".format(len(hold) - removed))
+    return kept
 
 
 def resolve(path):
@@ -213,6 +233,8 @@ def main():
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
     p.add_argument("--prompt", default="v6", help="사용할 프롬프트 이름 (run_qwen.py의 PROMPTS: v6, v7). 결과 파일 이름에 붙음")
+    p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
+    p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -221,6 +243,8 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     rows = load_mmr_csv(a.mmr_out)
     print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
+    if not a.no_holdout and os.path.exists(a.holdout):
+        rows = apply_holdout(rows, a.holdout)
     if a.quick:
         sub = quick_subset(rows, a.quick)
         fname = "qwen_quick_{}.jsonl".format(TAG)
