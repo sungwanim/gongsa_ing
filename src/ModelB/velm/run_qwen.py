@@ -530,6 +530,26 @@ Rules:
 4. Do not return any class other than the five listed above.
 """
 
+V11_HEAD = """You are inspecting an aircraft engine blade.
+
+Every blade is shown as several images: (1) the whole blade, and (2) one or more close-up crops of the regions that an automatic anomaly detector found suspicious (crop 1 is the most suspicious one). The crops are cut from the original photo at full resolution, with some surrounding context. The number of crops differs from blade to blade.
+First you will see labeled reference examples: DEFECTIVE blades (the crop shows the real defect) and NORMAL blades (the crop shows an ordinary region of a normal blade). Each example states how the photo was taken (different background, different lighting, or different camera view) and its label.
+The same defect type can look different under different conditions and on different blades, so learn what each defect looks like instead of matching exact pixels.
+"""
+
+V11_TAIL = """Now classify the inspection blade that follows into exactly ONE of the following five classes:
+
+{class_list}
+
+For the inspection blade the crops were chosen automatically. Some of them can show normal areas, and the real defect can lie outside all crops, so look at the whole blade and at EVERY crop. Choose normal only if none of the images shows any of the defects from the reference examples. Differences in brightness, color, reflection, shadow or background alone are not defects.
+
+Rules:
+1. Select exactly one class.
+2. Return only the class name.
+3. Do not provide an explanation.
+4. Do not return any class other than the five listed above.
+"""
+
 VIEW_PROMPTS = {
     "v9": {
         "head": V9_HEAD, "tail": V9_TAIL,
@@ -537,6 +557,13 @@ VIEW_PROMPTS = {
         "ref_cr": "Close-up of the boxed region:",
         "q_ov": "Inspection blade, whole blade with the red box:",
         "q_cr": "Close-up of the boxed region:",
+    },
+    "v11": {
+        "head": V11_HEAD, "tail": V11_TAIL,
+        "ref_ov": "Reference example {i}: {cond}, label = {label}. Whole blade:",
+        "ref_cr": "Close-up crop of the suspicious region:",
+        "q_ov": "Inspection blade, whole blade:",
+        "q_cr": "Inspection blade, close-up crop {i} of {n} (crop 1 is the most suspicious region):",
     },
     "v10": {
         "head": V10_HEAD, "tail": V10_TAIL,
@@ -574,11 +601,14 @@ class CachedViewClassifier(CachedRefClassifier):
             content.append({"type": "text", "text": P["ref_cr"]})
             content.append({"type": "image", "image": cr})
         content.append({"type": "text", "text": P["tail"].format(class_list="\n".join("- " + c for c in CLASSES))})
-        ov, cr = self.view_fn(image_path)
+        ov, crops = self.view_fn(image_path)
+        if not isinstance(crops, (list, tuple)):        # 크롭이 한 장(v9, v10)이면 목록으로
+            crops = [crops]
         content.append({"type": "text", "text": P["q_ov"]})
         content.append({"type": "image", "image": ov})
-        content.append({"type": "text", "text": P["q_cr"]})
-        content.append({"type": "image", "image": cr})
+        for i, cr in enumerate(crops, 1):
+            content.append({"type": "text", "text": P["q_cr"].format(i=i, n=len(crops))})
+            content.append({"type": "image", "image": cr})
         content.append({"type": "text", "text": "Answer with only the class name."})
         messages = [{"role": "user", "content": content}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

@@ -578,19 +578,25 @@ def run_v10(a, rows):
         return region_crop.views_from_mask(r["path"], region_kw=rk, **rvk)
 
     ref_views = [ref_view(r) for r in refs]
-    view_fn = lambda path: region_crop.views_from_map(resolve(path), maps, region_kw=rk, **vk)
+    if a.prompt == "v11":      # 의심 부위를 여러 곳(1~max_crops) 크롭
+        view_fn = lambda path: region_crop.views_multi(resolve(path), maps, max_crops=a.max_crops, rel=a.crop_rel,
+                                                       region_kw=rk, overview_side=504, crop_side=a.crop_side)
+    else:
+        view_fn = lambda path: region_crop.views_from_map(resolve(path), maps, region_kw=rk, **vk)
 
     if a.dump_views:
-        vdir = os.path.join(a.out, "views_v10")
+        vdir = os.path.join(a.out, "views_" + a.prompt)
         os.makedirs(vdir, exist_ok=True)
         for i, (r, (ov, cr)) in enumerate(zip(refs, ref_views), 1):
             ov.save(os.path.join(vdir, "ref_{:02d}_{}_{}_whole.jpg".format(i, r["condition"], r["label"])), quality=92)
             cr.save(os.path.join(vdir, "ref_{:02d}_{}_{}_crop.jpg".format(i, r["condition"], r["label"])), quality=92)
         for r in quick_subset(rows, a.dump_views, cond=lambda r: r["zone10"] in ("amb", "confident")):
             ov, cr = view_fn(r["path"])
+            crs = cr if isinstance(cr, (list, tuple)) else [cr]
             base = "q_{}_{}_{}".format(r["type"], r["domain"], os.path.basename(r["path"])[:-4])
             ov.save(os.path.join(vdir, base + "_whole.jpg"), quality=92)
-            cr.save(os.path.join(vdir, base + "_crop.jpg"), quality=92)
+            for ci, c in enumerate(crs, 1):
+                c.save(os.path.join(vdir, "{}_crop{}.jpg".format(base, ci)), quality=92)
         print("저장: {} (전체 사진/크롭 쌍). 열어서 크롭이 의심 부위를 잘 담았는지 확인하세요.".format(vdir))
         return
 
@@ -629,7 +635,7 @@ def main():
     p.add_argument("--out", default=os.path.join(HERE, "results"))
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
-    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6, v7, v8(참고 이미지), v9(박스+확대), v10(이중 임계값 + 전체/크롭 + 정상 참고, 권장). 결과 파일 이름에 붙음")
+    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6, v7, v8(참고 이미지), v9(박스+확대), v10(이중 임계값 + 전체/크롭 한 곳 + 정상 참고), v11(v10 + 의심 부위를 여러 곳 크롭, 권장). 결과 파일 이름에 붙음")
     p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
     p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수. 제외 목록(holdout_manifest.csv)에 있는 만큼까지 사용 (지금은 그룹당 1장 = 12장)")
@@ -648,6 +654,8 @@ def main():
     p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
     p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
     p.add_argument("--no-type-bias", dest="type_bias", action="store_false", help="v10: 클래스별 쏠림 보정을 끈다 (기본은 보정용 절반으로 학습해 적용)")
+    p.add_argument("--max-crops", type=int, default=3, help="v11: 이미지당 최대 크롭 수 (의심 부위가 여러 곳이면 그 수만큼, 기본 최대 3)")
+    p.add_argument("--crop-rel", type=float, default=0.5, help="v11: 1순위 의심 부위 점수의 이 비율보다 약한 곳은 크롭하지 않음 (기본 0.5)")
     p.add_argument("--crop-min", type=int, default=600, help="v10: 의심 부위 크롭의 최소 한 변(원본 픽셀)")
     p.add_argument("--crop-max", type=int, default=900, help="v10: 의심 부위 크롭의 최대 한 변(원본 픽셀)")
     p.add_argument("--crop-side", type=int, default=600, help="v10: Qwen에 넘기는 크롭 한 변(픽셀). 원본 크롭이 이보다 크면 이 크기로만 줄임")
@@ -663,9 +671,9 @@ def main():
         if not os.path.exists(a.holdout):
             raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
-    if a.prompt == "v10":
+    if a.prompt in ("v10", "v11"):
         if a.no_holdout:
-            raise SystemExit("v10은 holdout 15장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
+            raise SystemExit("{}은 holdout 15장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).".format(a.prompt))
         run_v10(a, rows)
         return
     if a.band_info:

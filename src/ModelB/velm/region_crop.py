@@ -116,3 +116,49 @@ def views_from_mask(image_path, region_kw=None, **kw):
     w, h = Image.open(image_path).size
     box = box_from_mask(mask_path, w, h)
     return make_views(image_path, square_region(box, w, h, **(region_kw or {})), **kw)
+
+
+def topk_regions(amap, width, height, max_crops=3, rel=0.5, region_kw=None, pad=10):
+    """의심 부위를 점수가 높은 곳부터 여러 곳 찾는다 (원본 좌표의 정사각형 영역 목록).
+       - 1순위 점수 대비 rel 비율보다 약한 곳은 버린다 (의심이 약한 곳까지 보내지 않기 위해)
+       - 이미 고른 크롭과 많이 겹치는 곳은 합친다(건너뜀)
+       반환: [(영역, 점수)] , 항상 1곳 이상"""
+    amap = np.array(amap, dtype=np.float32).copy()
+    lo = float(amap.min())
+    out, first = [], None
+    for _ in range(max_crops * 3):                       # 겹쳐서 건너뛰는 경우를 위해 여유 있게 탐색
+        peak = float(amap.max())
+        if first is None:
+            first = peak
+        elif (peak - lo) < rel * (first - lo):
+            break
+        x0, y0, x1, y1 = bbox_from_map(amap)
+        box = map_box_to_original((x0, y0, x1, y1), width, height)
+        reg = square_region(box, width, height, **(region_kw or {}))
+        amap[max(y0 - pad, 0):y1 + pad, max(x0 - pad, 0):x1 + pad] = lo
+        dup = False
+        for g, _p in out:
+            ix = max(0, min(g[2], reg[2]) - max(g[0], reg[0]))
+            iy = max(0, min(g[3], reg[3]) - max(g[1], reg[1]))
+            if ix * iy > 0.5 * (reg[2] - reg[0]) * (reg[3] - reg[1]):
+                dup = True
+                break
+        if not dup:
+            out.append((reg, peak))
+        if len(out) >= max_crops:
+            break
+    return out
+
+
+def views_multi(image_path, map_index, max_crops=3, rel=0.5, region_kw=None, overview_side=504, crop_side=600):
+    """검사 이미지: (전체 사진, [의심 부위 크롭 ... ]) - 크롭 개수는 이미지마다 1~max_crops.
+    크롭은 원본에서 그대로 자르고 crop_side보다 클 때만 그 크기로 줄인다. 빨간 박스는 그리지 않는다."""
+    w, h = Image.open(image_path).size
+    regs = topk_regions(map_index.get(image_path), w, h, max_crops, rel, region_kw)
+    overview = None
+    crops = []
+    for reg, _peak in regs:
+        ov, cr = make_views(image_path, reg, overview_side=overview_side, crop_side=crop_side, draw_box=False)
+        overview = overview or ov
+        crops.append(cr)
+    return overview, crops
