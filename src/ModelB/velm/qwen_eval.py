@@ -633,19 +633,20 @@ def tradeoff_v8(a, rows):
         "MMR목표", "t목표", "t", "Acc", "Prec", "Recall", "FPR", "F1", "놓친불량(FN)", "오탐(FP)"))
     print("{:>10} {:>10} | {:>6} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
         "MMR단독", "-", "-", base["Accuracy"], base["Precision"], base["Recall"], base["FPR"], base["F1"], base["FN"], base["FP"]))
-    for rt in (0.90, 0.95, 0.98):
+    for rt in (0.95, 0.98, 0.99):
         lo, hi = calibrate_v10(calib, rt, a.fpr_hi)
         mark_zones_v10(rows, lo, hi)
         need = [r for r in rows if r["zone10"] != "clear_normal" and key(r) not in pm]
         if need:
-            print("{:>10.2f} (Qwen 결과가 없는 이미지 {}장이 있어 건너뜀)".format(rt, len(need)))
+            print("{:>10.2f} (Qwen 결과가 없는 이미지 {}장이 있어 건너뜀 -> --recall-target {} --step qwen 으로 먼저 추가 판정하세요)".format(rt, len(need), rt))
             continue
-        for nr in (0.80, 0.85, 0.90, 0.95):
+        for nr in (0.95, 0.97, 0.98, 0.99):
             t = choose_t_by_recall(calib, pm, None, nr)
             m = v10_summary(report, pm, t, None)
-            print("{:>10.2f} {:>10.2f} | {:>6.3f} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
-                rt, nr, t, m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"], m["FN"], m["FP"]))
-    print("\n읽는 법: 재현율 목표를 낮출수록 오탐(FPR, FP)이 줄지만 놓치는 불량(FN)이 늘어납니다.")
+            mark = "  <- 재현율이 MMR 이상" if m["Recall"] >= base["Recall"] else ""
+            print("{:>10.2f} {:>10.2f} | {:>6.3f} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}{}".format(
+                rt, nr, t, m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"], m["FN"], m["FP"], mark))
+    print("\n읽는 법: '<- 재현율이 MMR 이상' 표시가 있는 줄만 재현율 조건을 만족합니다. 재현율을 올릴수록 오탐(FPR, FP)이 늘어납니다.")
     print("          'MMR목표'=MMR 아래쪽 임계값을 정하는 재현율, 't목표'=Qwen normal 기준값을 정하는 재현율.")
 
 
