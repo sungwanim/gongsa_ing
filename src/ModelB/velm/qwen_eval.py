@@ -117,7 +117,12 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
                 else:
                     out = classify_image(resolve(r["path"]), model, processor, prompt=TAG, refs=refs, ref_max_pixels=ref_px)
             except Exception as e:
-                out = {"label": "unknown", "confidence": 0.0, "probs": {}, "class_mass": 0.0, "raw": "ERROR: {}".format(e)}
+                # 오류는 결과로 저장하지 않는다 (저장하면 '끝난 이미지'로 취급되어 다시 판정되지 않음)
+                msg = str(e)
+                print("[오류] {} 처리 실패, 저장하지 않고 건너뜀: {}: {}".format(os.path.basename(r["path"]), type(e).__name__, msg[:200]), flush=True)
+                if "out of memory" in msg.lower():
+                    raise SystemExit("GPU 메모리 부족으로 중단합니다. 같은 GPU를 쓰는 다른 작업이 있는지 확인하세요. (저장된 결과는 이어서 할 수 있습니다)")
+                continue
             f.write(json.dumps({"key": key(r), "raw": out["raw"], "pred_type": out["label"],
                                 "confidence": out["confidence"], "probs": out["probs"],
                                 "class_mass": out["class_mass"]}, ensure_ascii=False) + "\n")
