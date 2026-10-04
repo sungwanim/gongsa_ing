@@ -618,6 +618,37 @@ def eval_rule(a, rows, report):
     evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
 
 
+def tradeoff_v8(a, rows):
+    """재현율 목표를 바꿔 가며 오탐(FPR)이 어떻게 달라지는지 한 표로 보여 준다 (GPU 불필요, 파일 저장 없음).
+    tau_lo(MMR 아래쪽 임계값)의 재현율 목표 x t(Qwen normal 기준)의 재현율 목표 조합. 임계값은 보정용 절반으로, 수치는 보고용 절반으로."""
+    global TAG
+    TAG = a.prompt
+    calib = [r for r in rows if split_of(r) == "calib"]
+    report = [r for r in rows if split_of(r) == "report"]
+    pm = load_probs(a.out)
+    y = np.array([r["label"] for r in report]); pred1 = np.array([r["pred"] for r in report])
+    base = metrics(y, pred1)
+    print("보고용 {}장 (정상 {} / 불량 {})".format(len(report), int((y == 0).sum()), int((y == 1).sum())))
+    print("{:>10} {:>10} | {:>6} | {:>7} {:>6} {:>7} {:>6} {:>6} | {:>13} | {:>9}".format(
+        "MMR목표", "t목표", "t", "Acc", "Prec", "Recall", "FPR", "F1", "놓친불량(FN)", "오탐(FP)"))
+    print("{:>10} {:>10} | {:>6} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
+        "MMR단독", "-", "-", base["Accuracy"], base["Precision"], base["Recall"], base["FPR"], base["F1"], base["FN"], base["FP"]))
+    for rt in (0.90, 0.95, 0.98):
+        lo, hi = calibrate_v10(calib, rt, a.fpr_hi)
+        mark_zones_v10(rows, lo, hi)
+        need = [r for r in rows if r["zone10"] != "clear_normal" and key(r) not in pm]
+        if need:
+            print("{:>10.2f} (Qwen 결과가 없는 이미지 {}장이 있어 건너뜀)".format(rt, len(need)))
+            continue
+        for nr in (0.80, 0.85, 0.90, 0.95):
+            t = choose_t_by_recall(calib, pm, None, nr)
+            m = v10_summary(report, pm, t, None)
+            print("{:>10.2f} {:>10.2f} | {:>6.3f} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
+                rt, nr, t, m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"], m["FN"], m["FP"]))
+    print("\n읽는 법: 재현율 목표를 낮출수록 오탐(FPR, FP)이 줄지만 놓치는 불량(FN)이 늘어납니다.")
+    print("          'MMR목표'=MMR 아래쪽 임계값을 정하는 재현율, 't목표'=Qwen normal 기준값을 정하는 재현율.")
+
+
 def run_v8_rule(a, rows):
     """v8 방식(참고 불량 12장 + 이미지 한 장)의 Qwen 확률에 v10 판정 규칙(MMR 이중 임계값 + t + 쏠림 보정)을 적용한다.
     MMR이 의심하는 구간 중 v8 결과가 아직 없는 이미지는 Qwen(v8)으로 추가 판정한다."""
@@ -636,6 +667,9 @@ def run_v8_rule(a, rows):
     pm = load_probs(a.out)
     need = [r for r in rows if r["zone10"] in ("amb", "confident") and key(r) not in pm]
     print("Qwen(v8) 결과가 이미 있는 이미지 {}장 / 아직 없는 이미지 {}장".format(len(pm), len(need)), flush=True)
+    if a.tradeoff:
+        tradeoff_v8(a, rows)
+        return
     if a.step in ("all", "qwen") and need:
         ref_path = os.path.join(HERE, "holdout_manifest_12.csv")        # v8 참고 이미지: 불량 12장
         refs = build_refs(ref_path, 1)
@@ -743,6 +777,7 @@ def main():
     p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
     p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
     p.add_argument("--v8-rule", action="store_true", help="v8 방식(참고 불량 12장)의 Qwen 확률에 v10 판정 규칙을 적용해 평가. 예: --prompt v8_n12 --v8-rule")
+    p.add_argument("--tradeoff", action="store_true", help="--v8-rule 과 함께: 재현율 목표를 바꿔 가며 오탐/놓친 불량이 어떻게 달라지는지 표로 출력 (GPU 불필요)")
     p.add_argument("--normal-recall", type=float, default=0.95, help="v10/--v8-rule: 보정용 절반에서 시스템 재현율이 이 값 이상이 되는 가장 작은 t를 자동 선택 (기본 0.95). 0이면 --normal-thr 고정값 사용")
     p.add_argument("--type-bias", dest="type_bias", action="store_true", help="클래스별 쏠림 보정을 켠다 (보정용 절반으로 학습). 기본은 끔: 시험에서 타입 맞힘이 오히려 줄었음 (334 -> 304 / 580)")
     p.add_argument("--no-type-bias", dest="type_bias", action="store_false", help="(기본값) 쏠림 보정을 끈다")
