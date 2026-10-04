@@ -551,7 +551,7 @@ def run_v10(a, rows):
         recall_info(rows, a.fpr_hi)
         return
     refs = build_refs(a.holdout, 1)
-    TAG = "v10_n{}".format(len(refs))
+    TAG = "{}_n{}".format(a.prompt, len(refs))
     print("참고 이미지 {}장 (불량 {} + 정상 {}), 결과 이름 {}".format(
         len(refs), sum(1 for r in refs if r["label"] != "good"), sum(1 for r in refs if r["label"] == "good"), TAG), flush=True)
     calib = [r for r in rows if split_of(r) == "calib"]
