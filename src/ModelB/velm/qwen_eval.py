@@ -321,6 +321,58 @@ def evaluate(rows, out_dir, quiet=False, band_pct=None):
     return out, {"type_acc": acc, "unknown": unk, "conf_line": conf_line}
 
 
+def sweep_normal(rows, out_dir):
+    """저장된 확률로 'normal 확률 기준값(t)'을 바꿔 가며 결과를 비교한다 (GPU 불필요).
+    규칙: MMR이 불량으로 본 이미지에서 Qwen의 normal 확률 >= t 이면 정상, 아니면 불량.
+          불량 타입은 normal을 뺀 4개 중 확률이 가장 큰 것. (t > 1 이면 MMR 불량 판정을 전부 유지하고 타입만 Qwen이 정함)"""
+    fpath = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
+    if not os.path.exists(fpath):
+        raise SystemExit("결과 파일이 없습니다: {}".format(fpath))
+    pm = {}
+    with open(fpath) as f:
+        for l in f:
+            if l.strip():
+                d = json.loads(l)
+                if d.get("probs"):
+                    pm[d["key"]] = d["probs"]
+    flagged = [r for r in rows if r["pred"] == 1]
+    miss = [r for r in flagged if key(r) not in pm]
+    if miss:
+        raise SystemExit("확률이 없는 이미지 {}장 (예: {}). 먼저 Qwen 단계를 끝내세요.".format(len(miss), key(miss[0])))
+    y = np.array([r["label"] for r in rows]); pred1 = np.array([r["pred"] for r in rows])
+    typ = np.array([r["type"] for r in rows])
+    pn = np.zeros(len(rows)); best = np.array(["good"] * len(rows), dtype=object)
+    for i, r in enumerate(rows):
+        if r["pred"] == 1:
+            pr = pm[key(r)]
+            pn[i] = pr.get("normal", 0.0)
+            dp = {k: v for k, v in pr.items() if k != "normal"}
+            best[i] = max(dp, key=dp.get) if dp else "unknown"
+    n_def = int((y == 1).sum())
+    lines = ["MMR 불량 판정 {}장 중 Qwen 확률로 재판정. 평가 대상 {}장 (정상 {} / 불량 {}).".format(len(flagged), len(rows), int((y == 0).sum()), n_def),
+             "규칙: normal 확률 >= t 이면 정상, 아니면 불량(타입 = normal 제외 4개 중 확률 최대). t가 낮을수록 불량으로 더 많이 판정.", "",
+             "{:>7} | {:>8} {:>9} {:>7} {:>7} {:>7} | {:>5} {:>5} {:>5} {:>5} | {:>20}".format(
+                 "t", "Accuracy", "Precision", "Recall", "FPR", "F1", "TN", "FP", "FN", "TP", "타입 맞힘(불량 기준)")]
+    m = metrics(y, pred1)
+    lines.append("{:>7} | {:>8.4f} {:>9.4f} {:>7.4f} {:>7.4f} {:>7.4f} | {:>5} {:>5} {:>5} {:>5} | {:>20}".format(
+        "MMR단독", m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"], m["TN"], m["FP"], m["FN"], m["TP"], "-"))
+    for t in (0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 0.999, 1.01):
+        final = np.where((pred1 == 1) & (pn < t), best, "good")
+        pred2 = (final != "good").astype(int)
+        m = metrics(y, pred2)
+        ok = int(((y == 1) & (final == typ)).sum())
+        lines.append("{:>7} | {:>8.4f} {:>9.4f} {:>7.4f} {:>7.4f} {:>7.4f} | {:>5} {:>5} {:>5} {:>5} | {:>13}/{:<6}".format(
+            ("%g" % t) if t <= 1 else "항상불량", m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"],
+            m["TN"], m["FP"], m["FN"], m["TP"], ok, n_def))
+    lines += ["", "참고: t는 이 평가 이미지로 고르면 결과가 실제보다 좋게 보입니다(낙관적). 보고서에는 t를 어떻게 정했는지 같이 적으세요.",
+              "      타입 맞힘 = 불량 이미지 중 최종 타입이 정답과 같은 수. '항상불량' 줄은 MMR이 불량이라 한 것을 전부 불량으로 두고 타입만 Qwen이 정한 경우."]
+    text = "\n".join(lines) + "\n"
+    print(text)
+    with open(os.path.join(out_dir, "sweep_{}.txt".format(TAG)), "w") as f:
+        f.write(text)
+    print("저장: {}/sweep_{}.txt".format(out_dir, TAG))
+
+
 def compare_all(rows, out_dir, tags):
     """MMR 단독 + 프롬프트별(MMR+Qwen) 결과를 한 표로 비교. 각 프롬프트의 qwen_results_<tag>.jsonl 이 필요."""
     global TAG
@@ -380,6 +432,7 @@ def main():
                    help="저장된 결과로 MMR 단독 + 여러 프롬프트를 한 표로 비교. 예: v6,v7,v8")
     p.add_argument("--band-pct", type=float, default=None, metavar="N",
                    help="MMR 불량 판정 임계값 위아래 N%% 안의 애매한 이미지만 Qwen이 정상/불량 판정(확실한 불량은 타입만 분류). 예: --band-pct 20")
+    p.add_argument("--sweep-normal", action="store_true", help="저장된 확률로 normal 확률 기준값(t)을 바꿔 가며 정확도/재현율/F1/타입 맞힘을 표로 출력 (GPU 불필요)")
     p.add_argument("--band-info", action="store_true", help="MMR 점수 분포와 N%%별 애매한 이미지 수를 출력하고 종료 (GPU 불필요)")
     p.add_argument("--no-cache", action="store_true", help="v8: 참고 이미지 캐시를 쓰지 않고 매번 전부 계산 (느림, 비교/확인용)")
     p.add_argument("--quick", type=int, default=None, metavar="N",
@@ -404,6 +457,9 @@ def main():
         for r in rows:
             z[r["zone"]] = z.get(r["zone"], 0) + 1
         print("애매한 구간: 임계값 {:.5f} 기준 위아래 {:g}% = 점수 {:.5f} ~ {:.5f} | 구간별 이미지 수 {}".format(thr, a.band_pct, down, up, z), flush=True)
+    if a.sweep_normal:
+        sweep_normal(rows, a.out)
+        return
     if a.compare:
         compare_all(rows, a.out, [t.strip() for t in a.compare.split(",") if t.strip()])
         return
