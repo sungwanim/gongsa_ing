@@ -462,10 +462,35 @@ def compare_all(rows, out_dir, tags):
     print("저장: {0}/comparison_all.txt, comparison_all.csv".format(out_dir))
 
 
+def recall_info(rows, fpr_hi):
+    """재현율 목표별로 MMR 아래쪽 임계값(tau_lo)과 'Qwen에 가는 이미지 비율'을 보여 준다 (GPU 불필요).
+    임계값은 보정용 절반으로 정하고, 비율/놓침은 보고용 절반으로 잰다."""
+    calib = [r for r in rows if split_of(r) == "calib"]
+    report = [r for r in rows if split_of(r) == "report"]
+    nd = sum(1 for r in report if r["label"] == 1)
+    nn = sum(1 for r in report if r["label"] == 0)
+    print("보정용 {}장 / 보고용 {}장 (보고용: 불량 {}, 정상 {})".format(len(calib), len(report), nd, nn))
+    print("{:>9} | {:>8} {:>8} | {:>14} {:>14} {:>16} | {:>14}".format(
+        "재현율목표", "tau_lo", "tau_hi", "Qwen에 가는 전체", "그중 정상(오탐)", "MMR이 놓치는 불량", "Qwen 처리 시간(약)"))
+    for tgt in (0.80, 0.85, 0.90, 0.95, 0.98, 0.99):
+        lo, hi = calibrate_v10(calib, tgt, fpr_hi)
+        sent = [r for r in report if r["score"] >= lo]
+        sent_n = sum(1 for r in sent if r["label"] == 0)
+        miss = sum(1 for r in report if r["label"] == 1 and r["score"] < lo)
+        print("{:>9.2f} | {:>8.4f} {:>8.4f} | {:>9}/{} ({:>4.0%}) {:>8}/{} ({:>4.0%}) {:>8}/{} ({:>4.1%}) | {:>11.0f}분".format(
+            tgt, lo, hi, len(sent), len(report), len(sent) / len(report), sent_n, nn, sent_n / nn, miss, nd, miss / nd,
+            len(sent) * 2 * 1.5 / 60.0))     # 전체 이미지 수로 환산한 대략의 시간(보고용 절반 x2, 장당 1.5초 가정)
+    print("\n읽는 법: 재현율 목표를 높일수록 불량을 덜 놓치지만 Qwen에 가는 이미지(특히 정상)가 늘어납니다.")
+    print("          '그중 정상(오탐)'이 Qwen이 걸러 줘야 하는 정상 이미지 수입니다. 시간은 대략적인 가정치입니다(장당 1.5초).")
+
+
 def run_v10(a, rows):
     """v10 전체 흐름: 이중 임계값(재현율 기준) -> 구간별로 Qwen(전체 사진 + 의심 부위 크롭, 정상 참고 포함) -> 평가"""
     global TAG
     import region_crop
+    if a.recall_info:
+        recall_info(rows, a.fpr_hi)
+        return
     refs = build_refs(a.holdout, 1)
     TAG = "v10_n{}".format(len(refs))
     print("참고 이미지 {}장 (불량 {} + 정상 {}), 결과 이름 {}".format(
@@ -550,6 +575,7 @@ def main():
     p.add_argument("--dump-views", type=int, default=None, metavar="N",
                    help="v9: 박스/확대 사진이 제대로 만들어지는지 눈으로 보기 위해 타입(정상 포함)별 N장을 results/views/ 에 저장하고 종료 (GPU 불필요)")
     p.add_argument("--recall-target", type=float, default=0.98, help="v10: MMR 아래쪽 임계값을 정하는 재현율 목표 (기본 0.98). 높일수록 Qwen이 보는 이미지가 늘어남")
+    p.add_argument("--recall-info", action="store_true", help="v10: 재현율 목표별로 Qwen에 가는 이미지 비율/놓치는 불량 비율을 표로 출력하고 종료 (GPU 불필요)")
     p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
     p.add_argument("--normal-thr", type=float, default=0.80, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.80, 높을수록 불량으로 판정하는 이미지가 늘어남)")
     p.add_argument("--crop-min", type=int, default=600, help="v10: 의심 부위 크롭의 최소 한 변(원본 픽셀)")
