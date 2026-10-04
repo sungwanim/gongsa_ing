@@ -50,7 +50,7 @@ def key(r):
 
 def run_qwen(rows, out_dir, limit=None):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
-    fpath = os.path.join(out_dir, "qwen_results_v5.jsonl")
+    fpath = os.path.join(out_dir, "qwen_results_v6.jsonl")
     done = set()
     if os.path.exists(fpath):
         with open(fpath) as f:
@@ -90,7 +90,7 @@ def metrics(y, pred, score=None):
 
 def evaluate(rows, out_dir):
     qwen, conf = {}, {}
-    fpath = os.path.join(out_dir, "qwen_results_v5.jsonl")
+    fpath = os.path.join(out_dir, "qwen_results_v6.jsonl")
     if os.path.exists(fpath):
         with open(fpath) as f:
             for l in f:
@@ -145,7 +145,7 @@ def evaluate(rows, out_dir):
     bad = [conf[key(rows[i])] for i in flagged if final[i] != typ[i]]
     m = lambda v: "{:.3f}".format(float(np.mean(v))) if v else "-"
     conf_line = "Qwen 확신도(선택한 클래스 확률) 평균: 맞힌 {}장 {} / 틀린 {}장 {}".format(len(ok), m(ok), len(bad), m(bad))
-    with open(os.path.join(out_dir, "predictions_v5.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "predictions_v6.csv"), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["domain", "image_path", "true_type", "mmr_score", "mmr_pred", "qwen_label", "confidence", "final"])
         for i, r in enumerate(rows):
@@ -158,11 +158,11 @@ def evaluate(rows, out_dir):
         int(pred1.sum()), len(rows), acc, unk, conf_line)
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
     print(text)
-    with open(os.path.join(out_dir, "comparison_v5.txt"), "w") as f:
+    with open(os.path.join(out_dir, "comparison_v6.txt"), "w") as f:
         f.write(text)
-    with open(os.path.join(out_dir, "comparison_v5.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "comparison_v6.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
-    print("저장: {}/comparison_v5.txt, comparison_v5.csv, predictions_v5.csv".format(out_dir))
+    print("저장: {}/comparison_v6.txt, comparison_v6.csv, predictions_v6.csv".format(out_dir))
 
 
 def main():
