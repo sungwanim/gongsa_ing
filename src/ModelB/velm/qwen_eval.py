@@ -270,19 +270,9 @@ def evaluate(rows, out_dir, quiet=False, band_pct=None, v10=None, out_suffix="")
         if v10 is not None:
             # v10: MMR 점수 구간 + Qwen 확률.  clear_normal=정상 확정 / confident=불량 확정(Qwen이 못 뒤집음, 타입만 정함) /
             #      amb=Qwen의 normal 확률이 t_normal 이상일 때만 정상으로 인정, 아니면 불량(타입은 normal 제외 4개 중 확률 최대)
-            z = r["zone10"]
-            if z == "clear_normal":
-                final.append("good")
-                continue
-            if key(r) not in qwen:
+            if r["zone10"] != "clear_normal" and key(r) not in qwen:
                 raise SystemExit("Qwen 결과 누락: {} -> 먼저 --step qwen 으로 Qwen 단계를 실행하세요".format(key(r)))
-            pr = probs_map.get(key(r), {})
-            dp = {k: v for k, v in pr.items() if k != "normal"}
-            best = max(dp, key=dp.get) if dp else "unknown"
-            if z == "confident":
-                final.append(best)
-            else:
-                final.append("good" if pr.get("normal", 0.0) >= v10["t_normal"] else best)
+            final.append(v10_label(r, probs_map.get(key(r), {}), v10["t_normal"], v10.get("bias")))
             continue
         zone = r.get("zone") if band_pct else None
         if band_pct is None:
@@ -484,6 +474,75 @@ def recall_info(rows, fpr_hi):
     print("          '그중 정상(오탐)'이 Qwen이 걸러 줘야 하는 정상 이미지 수입니다. 시간은 대략적인 가정치입니다(장당 1.5초).")
 
 
+DEF4 = ["ablation", "breakdown", "fracture", "groove"]
+
+
+def load_probs(out_dir):
+    pm = {}
+    fp = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
+    if os.path.exists(fp):
+        with open(fp) as f:
+            for l in f:
+                if l.strip():
+                    d = json.loads(l)
+                    if d.get("probs"):
+                        pm[d["key"]] = d["probs"]
+    return pm
+
+
+def v10_label(r, pr, t_normal, bias=None):
+    """v10 최종 라벨. clear_normal=정상 / confident=불량(Qwen이 못 뒤집음, 타입만 정함) /
+    amb=normal 확률이 t_normal 이상일 때만 정상, 아니면 불량. 불량 타입은 normal을 뺀 4개 중 (보정한) 확률 최대."""
+    z = r["zone10"]
+    if z == "clear_normal":
+        return "good"
+    sc = {k: np.log(max(pr.get(k, 0.0), 1e-9)) + (bias.get(k, 0.0) if bias else 0.0) for k in DEF4}
+    best = max(sc, key=sc.get)
+    if z == "confident":
+        return best
+    return "good" if pr.get("normal", 0.0) >= t_normal else best
+
+
+def learn_type_bias(rows_calib, probs_map, iters=3000, lr=0.5, l2=0.01):
+    """클래스별 쏠림 보정값: 보정용 불량 이미지에서 normal을 뺀 4개 확률(로그)에 더할 값 b 를 학습한다.
+    (정답 타입의 확률이 높아지도록 소프트맥스 교차엔트로피를 줄임. 4개뿐이라 과적합 위험은 작다)"""
+    X, y = [], []
+    for r in rows_calib:
+        pr = probs_map.get(key(r))
+        if r["label"] == 1 and pr and r["zone10"] != "clear_normal" and r["type"] in DEF4:
+            X.append([np.log(max(pr.get(k, 0.0), 1e-9)) for k in DEF4]); y.append(DEF4.index(r["type"]))
+    if len(X) < 20:
+        return {k: 0.0 for k in DEF4}
+    X, y = np.array(X), np.array(y); Y = np.eye(4)[y]; b = np.zeros(4)
+    for _ in range(iters):
+        z = X + b; z -= z.max(1, keepdims=True); P = np.exp(z); P /= P.sum(1, keepdims=True)
+        b -= lr * ((P - Y).mean(0) + l2 * b)
+    b -= b.mean()
+    return {k: float(v) for k, v in zip(DEF4, b)}
+
+
+def v10_summary(rows, probs_map, t, bias=None):
+    y = np.array([r["label"] for r in rows]); typ = np.array([r["type"] for r in rows])
+    fin = np.array([v10_label(r, probs_map.get(key(r), {}), t, bias) for r in rows], dtype=object)
+    m = metrics(y, (fin != "good").astype(int))
+    nd = int((y == 1).sum())
+    per = {k: (int(((typ == k) & (fin == k)).sum()), int((typ == k).sum())) for k in DEF4}
+    m["type_ok"] = int(((y == 1) & (fin == typ)).sum()); m["n_def"] = nd; m["per"] = per
+    return m
+
+
+def print_v10_sweep(rows, probs_map, bias, title):
+    print(title)
+    print("{:>6} | {:>7} {:>9} {:>7} {:>6} {:>6} | {:>8} | 타입 맞힘 (ablation / breakdown / fracture / groove)".format(
+        "t", "Acc", "Precision", "Recall", "FPR", "F1", "타입맞힘"))
+    for t in (0.80, 0.90, 0.95, 0.97, 0.99, 0.995):
+        m = v10_summary(rows, probs_map, t, bias)
+        per = m["per"]
+        print("{:>6.3f} | {:>7.3f} {:>9.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>4}/{:<4}| {}".format(
+            t, m["Accuracy"], m["Precision"], m["Recall"], m["FPR"], m["F1"], m["type_ok"], m["n_def"],
+            " / ".join("{}/{}".format(*per[k]) for k in DEF4)))
+
+
 def run_v10(a, rows):
     """v10 전체 흐름: 이중 임계값(재현율 기준) -> 구간별로 Qwen(전체 사진 + 의심 부위 크롭, 정상 참고 포함) -> 평가"""
     global TAG
@@ -546,10 +605,20 @@ def run_v10(a, rows):
             return
         run_qwen(rows, a.out, a.limit, refs=refs, view_fn=view_fn, ref_views=ref_views, view_variant="v10", select=sel)
     if a.step in ("all", "eval"):
-        v10 = {"t_normal": a.normal_thr}
-        print("\n===== 보고용 절반({}장)으로 평가 [임계값은 보정용 절반으로 정함] / normal 인정 기준 {} =====".format(len(report), a.normal_thr))
+        pm = load_probs(a.out)
+        calib_rows = [r for r in rows if split_of(r) == "calib"]
+        bias = learn_type_bias(calib_rows, pm) if a.type_bias else None
+        if bias:
+            print("\n클래스별 쏠림 보정값 (보정용 절반으로 학습; 양수=그 타입을 더 고르게, 음수=덜 고르게): " +
+                  ", ".join("{} {:+.2f}".format(k, v) for k, v in bias.items()))
+        print_v10_sweep(report, pm, None, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 없음")
+        if bias:
+            print_v10_sweep(report, pm, bias, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 적용")
+        v10 = {"t_normal": a.normal_thr, "bias": bias}
+        print("\n===== 보고용 절반({}장) 상세 평가: normal 인정 기준 t={}, 쏠림 보정 {} [임계값/보정값은 보정용 절반으로 정함] =====".format(
+            len(report), a.normal_thr, "적용" if bias else "없음"))
         evaluate(report, a.out, v10=v10, out_suffix="_report")
-        print("\n(참고) 전체 {}장으로 평가한 결과는 results/comparison_{}_all.txt 에 저장됩니다. 임계값을 정한 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
+        print("\n(참고) 전체 {}장 평가는 results/comparison_{}_all.txt 에 저장됩니다. 보정에 쓴 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
         evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
 
 
@@ -577,7 +646,8 @@ def main():
     p.add_argument("--recall-target", type=float, default=0.98, help="v10: MMR 아래쪽 임계값을 정하는 재현율 목표 (기본 0.98). 높일수록 Qwen이 보는 이미지가 늘어남")
     p.add_argument("--recall-info", action="store_true", help="v10: 재현율 목표별로 Qwen에 가는 이미지 비율/놓치는 불량 비율을 표로 출력하고 종료 (GPU 불필요)")
     p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
-    p.add_argument("--normal-thr", type=float, default=0.80, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.80, 높을수록 불량으로 판정하는 이미지가 늘어남)")
+    p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
+    p.add_argument("--no-type-bias", dest="type_bias", action="store_false", help="v10: 클래스별 쏠림 보정을 끈다 (기본은 보정용 절반으로 학습해 적용)")
     p.add_argument("--crop-min", type=int, default=600, help="v10: 의심 부위 크롭의 최소 한 변(원본 픽셀)")
     p.add_argument("--crop-max", type=int, default=900, help="v10: 의심 부위 크롭의 최대 한 변(원본 픽셀)")
     p.add_argument("--crop-side", type=int, default=600, help="v10: Qwen에 넘기는 크롭 한 변(픽셀). 원본 크롭이 이보다 크면 이 크기로만 줄임")
