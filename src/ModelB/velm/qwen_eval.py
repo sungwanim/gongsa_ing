@@ -182,12 +182,12 @@ def split_of(r):
     return "calib" if int(hashlib.md5(key(r).encode()).hexdigest(), 16) % 2 == 0 else "report"
 
 
-def calibrate_v10(rows_calib, recall_target, fpr_hi):
+def calibrate_v10(rows_calib, recall_target, fpr_hi, field="score"):
     """MMR 점수의 임계값 두 개를 보정용 이미지로 정한다.
        tau_lo : 보정용 불량 중 recall_target 비율 이상이 이 점수 이상이 되도록 하는 가장 큰 값 (불량을 놓치지 않기 위한 아래쪽 기준)
        tau_hi : 보정용 정상 중 fpr_hi 비율 이하만 이 점수 이상이 되는 값 (이 이상이면 '확실한 불량')"""
-    d = sorted(r["score"] for r in rows_calib if r["label"] == 1)
-    n = sorted(r["score"] for r in rows_calib if r["label"] == 0)
+    d = sorted(r[field] for r in rows_calib if r["label"] == 1)
+    n = sorted(r[field] for r in rows_calib if r["label"] == 0)
     k = int(np.floor((1.0 - recall_target) * len(d)))          # 임계값보다 낮아도 되는 불량 수
     tau_lo = d[min(k, len(d) - 1)]
     m = int(np.floor(fpr_hi * len(n)))                         # 임계값 이상이어도 되는 정상 수
@@ -195,9 +195,26 @@ def calibrate_v10(rows_calib, recall_target, fpr_hi):
     return float(tau_lo), float(max(tau_hi, tau_lo))
 
 
-def mark_zones_v10(rows, tau_lo, tau_hi):
+def mark_zones_v10(rows, tau_lo, tau_hi, field="score"):
     for r in rows:
-        r["zone10"] = "clear_normal" if r["score"] < tau_lo else ("confident" if r["score"] >= tau_hi else "amb")
+        r["zone10"] = "clear_normal" if r[field] < tau_lo else ("confident" if r[field] >= tau_hi else "amb")
+
+
+def attach_router_scores(rows, mmr_out):
+    """라우터: MMR 이상 맵의 모양 특징 13가지로 정상/불량 점수(r["rscore"])를 만든다.
+    학습은 보정용 절반으로만 한다 (보고용 절반은 학습에 쓰지 않음)."""
+    import region_crop as rc
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    mi = rc.MapIndex(mmr_out)
+    X = np.array([rc.map_features(mi.get(resolve(r["path"]))) for r in rows])
+    y = np.array([r["label"] for r in rows])
+    cal = np.array([split_of(r) == "calib" for r in rows])
+    sc = StandardScaler().fit(X[cal])
+    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000).fit(sc.transform(X[cal]), y[cal])
+    z = clf.decision_function(sc.transform(X))
+    for r, v in zip(rows, z):
+        r["rscore"] = float(v)
 
 
 def quick_subset(rows, n, cond=None):
@@ -613,9 +630,10 @@ def eval_rule(a, rows, report):
     v10 = {"t_normal": t_use, "bias": bias}
     print("\n===== 보고용 절반({}장) 상세 평가: normal 인정 기준 t={}, 쏠림 보정 {} [임계값/보정값은 보정용 절반으로 정함] =====".format(
         len(report), t_use, "적용" if bias else "없음"))
-    evaluate(report, a.out, v10=v10, out_suffix="_report")
-    print("\n(참고) 전체 {}장 평가는 results/comparison_{}_all.txt 에 저장됩니다. 보정에 쓴 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
-    evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
+    rs = "_router" if getattr(a, "router", False) else ""
+    evaluate(report, a.out, v10=v10, out_suffix="_report" + rs)
+    print("\n(참고) 전체 {}장 평가는 results/comparison_{}_all{}.txt 에 저장됩니다. 보정에 쓴 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG, rs))
+    evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all" + rs)
 
 
 def tradeoff_v8(a, rows):
@@ -634,9 +652,10 @@ def tradeoff_v8(a, rows):
     print("{:>10} {:>10} | {:>6} | {:>7.3f} {:>6.3f} {:>7.3f} {:>6.3f} {:>6.3f} | {:>13} | {:>9}".format(
         "MMR단독", "-", "-", base["Accuracy"], base["Precision"], base["Recall"], base["FPR"], base["F1"], base["FN"], base["FP"]))
     rts, nrs = ((0.98, 0.99, 0.995, 1.0), (0.97, 0.98, 0.99, 0.995, 0.999)) if a.tradeoff_high else ((0.95, 0.98, 0.99), (0.95, 0.97, 0.98, 0.99))
+    field = "rscore" if getattr(a, "router", False) else "score"
     for rt in rts:
-        lo, hi = calibrate_v10(calib, rt, a.fpr_hi)
-        mark_zones_v10(rows, lo, hi)
+        lo, hi = calibrate_v10(calib, rt, a.fpr_hi, field)
+        mark_zones_v10(rows, lo, hi, field)
         need = [r for r in rows if r["zone10"] != "clear_normal" and key(r) not in pm]
         if need:
             print("{:>10.2f} (Qwen 결과가 없는 이미지 {}장이 있어 건너뜀 -> --recall-target {} --step qwen 으로 먼저 추가 판정하세요)".format(rt, len(need), rt))
@@ -658,8 +677,13 @@ def run_v8_rule(a, rows):
     TAG = a.prompt                      # 예: v8_n12  (기존 v8 결과 파일을 그대로 사용)
     calib = [r for r in rows if split_of(r) == "calib"]
     report = [r for r in rows if split_of(r) == "report"]
-    tau_lo, tau_hi = calibrate_v10(calib, a.recall_target, a.fpr_hi)
-    mark_zones_v10(rows, tau_lo, tau_hi)
+    field = "score"
+    if getattr(a, "router", False):
+        attach_router_scores(rows, a.mmr_out)          # 맵 모양 라우터 점수 (보정용 절반으로 학습)
+        field = "rscore"
+        print("라우터 사용: MMR 점수 대신 (점수 + 이상 맵 모양) 점수로 구간을 나눕니다")
+    tau_lo, tau_hi = calibrate_v10(calib, a.recall_target, a.fpr_hi, field)
+    mark_zones_v10(rows, tau_lo, tau_hi, field)
     cnt = {}
     for r in rows:
         cnt[r["zone10"]] = cnt.get(r["zone10"], 0) + 1
@@ -780,6 +804,7 @@ def main():
     p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
     p.add_argument("--v8-rule", action="store_true", help="v8 방식(참고 불량 12장)의 Qwen 확률에 v10 판정 규칙을 적용해 평가. 예: --prompt v8_n12 --v8-rule")
     p.add_argument("--tradeoff", action="store_true", help="--v8-rule 과 함께: 재현율 목표를 바꿔 가며 오탐/놓친 불량이 어떻게 달라지는지 표로 출력 (GPU 불필요)")
+    p.add_argument("--router", action="store_true", help="--v8-rule 과 함께: 구간 나누기에 MMR 점수 대신 (점수 + 이상 맵 모양) 라우터 점수를 사용")
     p.add_argument("--tradeoff-high", action="store_true", help="--tradeoff 와 함께: 재현율을 최대한 올리는 쪽(MMR 목표 0.98~1.0, t 목표 0.97~0.999)만 표로 출력")
     p.add_argument("--normal-recall", type=float, default=0.95, help="v10/--v8-rule: 보정용 절반에서 시스템 재현율이 이 값 이상이 되는 가장 작은 t를 자동 선택 (기본 0.95). 0이면 --normal-thr 고정값 사용")
     p.add_argument("--type-bias", dest="type_bias", action="store_true", help="클래스별 쏠림 보정을 켠다 (보정용 절반으로 학습). 기본은 끔: 시험에서 타입 맞힘이 오히려 줄었음 (334 -> 304 / 580)")

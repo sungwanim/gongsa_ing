@@ -21,34 +21,8 @@ sys.path.insert(0, HERE)
 import qwen_eval as q          # noqa: E402
 import region_crop as rc       # noqa: E402
 
-NAMES = ["최댓값", "상위1% 평균", "평균", "표준편차", "최댓값-중앙값", "덩어리 면적비율", "가장 큰 덩어리 면적",
-         "덩어리 수", "가늘기", "2순위 덩어리/1순위", "피크 x", "피크 y", "가장자리와의 거리"]
-
-
-def features(m):
-    m = np.asarray(m, dtype=np.float32)
-    mx, mn = float(m.max()), float(m.min())
-    thr = mn + 0.5 * (mx - mn)
-    mask = m >= thr
-    lab, n = ndimage.label(mask)
-    areas = ndimage.sum(mask, lab, range(1, n + 1)) if n else np.array([0.0])
-    k = int(np.argmax(areas)) + 1
-    comp = lab == k
-    ys, xs = np.where(comp)
-    if len(xs) > 2:
-        c = np.cov(np.vstack([xs, ys]))
-        ev = np.sort(np.linalg.eigvalsh(c))
-        elong = float(np.sqrt((ev[1] + 1e-6) / (ev[0] + 1e-6)))
-    else:
-        elong = 1.0
-    peaks = sorted([float(m[lab == i].max()) for i in range(1, n + 1)], reverse=True)
-    second = (peaks[1] - mn) / max(peaks[0] - mn, 1e-6) if len(peaks) > 1 else 0.0
-    py, px = np.unravel_index(int(np.argmax(m)), m.shape)
-    h, w = m.shape
-    edge = min(px, py, w - 1 - px, h - 1 - py) / (w / 2.0)
-    return [mx, float(np.sort(m.ravel())[-max(1, m.size // 100):].mean()), float(m.mean()), float(m.std()),
-            mx - float(np.median(m)), float(mask.mean()), float(areas.max()) / m.size, float(n), min(elong, 20.0),
-            second, px / w, py / h, edge]
+features = rc.map_features
+NAMES = rc.MAP_FEATURE_NAMES
 
 
 def cleared_at_recall(score, y, recall):
