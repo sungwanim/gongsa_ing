@@ -92,6 +92,44 @@ def key(r):
     return r["domain"] + "|" + r["path"]
 
 
+def estimate_threshold(rows):
+    """MMR이 쓴 불량 판정 임계값 추정: CSV의 prediction(=score>=임계값)에서 역산. (정상 판정 중 최고점, 불량 판정 중 최저점) 사이."""
+    s0 = [r["score"] for r in rows if r["pred"] == 0]
+    s1 = [r["score"] for r in rows if r["pred"] == 1]
+    lo, hi = max(s0), min(s1)
+    if lo >= hi:
+        print("[경고] 정상 판정 최고점({:.5f}) >= 불량 판정 최저점({:.5f}): 임계값이 하나가 아닐 수 있습니다".format(lo, hi))
+    return hi          # 불량 판정 중 최저 점수 = 임계값 바로 위 (임계값은 lo 초과, hi 이하)
+
+
+def mark_zones(rows, thr, pct):
+    """임계값 위아래 pct% 를 '애매한 구간'으로 표시. 각 행에 zone 저장:
+       clear_normal(확실한 정상) / lower_amb(정상 판정이지만 임계값 바로 아래) /
+       upper_amb(불량 판정이지만 임계값 바로 위) / confident(확실한 불량)"""
+    up, down = thr * (1 + pct / 100.0), thr * (1 - pct / 100.0)
+    for r in rows:
+        if r["pred"] == 1:
+            r["zone"] = "upper_amb" if r["score"] < up else "confident"
+        else:
+            r["zone"] = "lower_amb" if r["score"] >= down else "clear_normal"
+    return up, down
+
+
+def band_info(rows):
+    thr = estimate_threshold(rows)
+    print("MMR 불량 판정 임계값(추정) = {:.5f}".format(thr))
+    print("이미지 수: 정상 {} / 불량 {}  (MMR 판정 불량 {}장)".format(
+        sum(1 for r in rows if r["label"] == 0), sum(1 for r in rows if r["label"] == 1), sum(1 for r in rows if r["pred"] == 1)))
+    print("\n임계값 위아래 N% 구간별 이미지 수 (Qwen이 볼 대상)")
+    print("{:>6} | {:>20} | {:>12} {:>12} | {:>8}".format("N(%)", "점수 구간", "정상 이미지", "불량 이미지", "합계"))
+    for pct in (5, 10, 20, 30, 50):
+        up, down = thr * (1 + pct / 100.0), thr * (1 - pct / 100.0)
+        inb = [r for r in rows if down <= r["score"] < up]
+        g = sum(1 for r in inb if r["label"] == 0)
+        print("{:>6} | {:>9.4f} ~ {:<9.4f} | {:>12} {:>12} | {:>8}".format(pct, down, up, g, len(inb) - g, len(inb)))
+    print("\n(참고) 구간이 넓을수록 Qwen이 볼 이미지가 많아집니다. 이 숫자를 보고 --band-pct N 을 정하세요.")
+
+
 def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None, use_cache=True):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
     fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
@@ -99,7 +137,8 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_
     if os.path.exists(fpath):
         with open(fpath) as f:
             done = {json.loads(l)["key"] for l in f if l.strip()}
-    todo = [r for r in (subset if subset is not None else rows) if r["pred"] == 1 and key(r) not in done]
+    todo = [r for r in (subset if subset is not None else rows)
+            if (r["pred"] == 1 or r.get("zone") == "lower_amb") and key(r) not in done]
     if limit:
         todo = todo[:limit]
     print("Qwen 대상 {}장 (이미 완료 {}장)".format(len(todo), len(done)), flush=True)
@@ -185,8 +224,9 @@ def metrics(y, pred, score=None):
             "F1": d(2 * p * r, p + r), "TP": tp, "FN": fn, "FP": fp, "TN": tn, "ImageAUROC": auc}
 
 
-def evaluate(rows, out_dir, quiet=False):
-    qwen, conf = {}, {}
+def evaluate(rows, out_dir, quiet=False, band_pct=None):
+    out_tag = TAG + ("_b{:g}".format(band_pct) if band_pct else "")
+    qwen, conf, probs_map = {}, {}, {}
     fpath = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
     if os.path.exists(fpath):
         with open(fpath) as f:
@@ -195,14 +235,30 @@ def evaluate(rows, out_dir, quiet=False):
                     d = json.loads(l)
                     qwen[d["key"]] = "good" if d["pred_type"] == "normal" else d["pred_type"]
                     conf[d["key"]] = d.get("confidence")
+                    probs_map[d["key"]] = d.get("probs") or {}
     final = []                       # MMR+Qwen 최종 라벨: good 또는 타입
     for r in rows:
-        if r["pred"] == 0:
+        zone = r.get("zone") if band_pct else None
+        if band_pct is None:
+            # 기본: MMR이 불량으로 본 것은 전부 Qwen이 정상/타입 판정
+            if r["pred"] == 0:
+                final.append("good")
+            else:
+                if key(r) not in qwen:
+                    raise SystemExit("Qwen 결과 누락: {} -> 먼저 Qwen 단계를 실행하세요".format(key(r)))
+                final.append(qwen[key(r)])
+            continue
+        # 애매한 구간만 Qwen이 정상/불량 판정, 확실한 불량은 Qwen이 타입만 분류
+        if zone == "clear_normal":
             final.append("good")
-        else:
-            if key(r) not in qwen:
-                raise SystemExit("Qwen 결과 누락: {} -> 먼저 Qwen 단계를 실행하세요".format(key(r)))
-            final.append(qwen[key(r)])
+            continue
+        if key(r) not in qwen:
+            raise SystemExit("Qwen 결과 누락: {} -> 먼저 같은 --band-pct 로 Qwen 단계(--step qwen)를 실행하세요".format(key(r)))
+        q = qwen[key(r)]
+        if zone == "confident" and q == "good":          # 확실한 불량은 정상으로 못 뒤집음 -> 불량 타입 4개 중 확률 최대
+            pr = {k: v for k, v in probs_map.get(key(r), {}).items() if k != "normal"}
+            q = max(pr, key=pr.get) if pr else "unknown"
+        final.append(q)                                   # lower_amb: Qwen이 불량이라고 하면 불량으로 바뀜(구출), upper_amb: Qwen이 정상이라 하면 정상
     final = np.array(final)
     y = np.array([r["label"] for r in rows]); pred1 = np.array([r["pred"] for r in rows])
     score = np.array([r["score"] for r in rows]); typ = np.array([r["type"] for r in rows])
@@ -242,7 +298,7 @@ def evaluate(rows, out_dir, quiet=False):
     bad = [conf[key(rows[i])] for i in flagged if final[i] != typ[i]]
     m = lambda v: "{:.3f}".format(float(np.mean(v))) if v else "-"
     conf_line = "Qwen 확신도(선택한 클래스 확률) 평균: 맞힌 {}장 {} / 틀린 {}장 {}".format(len(ok), m(ok), len(bad), m(bad))
-    with open(os.path.join(out_dir, "predictions_{}.csv".format(TAG)), "w", newline="") as f:
+    with open(os.path.join(out_dir, "predictions_{}.csv".format(out_tag)), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["domain", "image_path", "true_type", "mmr_score", "mmr_pred", "qwen_label", "confidence", "final"])
         for i, r in enumerate(rows):
@@ -256,12 +312,12 @@ def evaluate(rows, out_dir, quiet=False):
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
     if not quiet:
         print(text)
-    with open(os.path.join(out_dir, "comparison_{}.txt".format(TAG)), "w") as f:
+    with open(os.path.join(out_dir, "comparison_{}.txt".format(out_tag)), "w") as f:
         f.write(text)
-    with open(os.path.join(out_dir, "comparison_{}.csv".format(TAG)), "w", newline="") as f:
+    with open(os.path.join(out_dir, "comparison_{}.csv".format(out_tag)), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
     if not quiet:
-        print("저장: {0}/comparison_{1}.txt, comparison_{1}.csv, predictions_{1}.csv".format(out_dir, TAG))
+        print("저장: {0}/comparison_{1}.txt, comparison_{1}.csv, predictions_{1}.csv".format(out_dir, out_tag))
     return out, {"type_acc": acc, "unknown": unk, "conf_line": conf_line}
 
 
@@ -322,6 +378,9 @@ def main():
     p.add_argument("--ref-px", type=int, default=128, help="v8: 참고 이미지 한 장당 토큰 수 (128이면 약 128*28*28 화소). 메모리 부족이면 줄이기")
     p.add_argument("--compare", default=None, metavar="TAGS",
                    help="저장된 결과로 MMR 단독 + 여러 프롬프트를 한 표로 비교. 예: v6,v7,v8")
+    p.add_argument("--band-pct", type=float, default=None, metavar="N",
+                   help="MMR 불량 판정 임계값 위아래 N%% 안의 애매한 이미지만 Qwen이 정상/불량 판정(확실한 불량은 타입만 분류). 예: --band-pct 20")
+    p.add_argument("--band-info", action="store_true", help="MMR 점수 분포와 N%%별 애매한 이미지 수를 출력하고 종료 (GPU 불필요)")
     p.add_argument("--no-cache", action="store_true", help="v8: 참고 이미지 캐시를 쓰지 않고 매번 전부 계산 (느림, 비교/확인용)")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
@@ -335,6 +394,16 @@ def main():
         if not os.path.exists(a.holdout):
             raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
+    if a.band_info:
+        band_info(rows)
+        return
+    if a.band_pct:
+        thr = estimate_threshold(rows)
+        up, down = mark_zones(rows, thr, a.band_pct)
+        z = {}
+        for r in rows:
+            z[r["zone"]] = z.get(r["zone"], 0) + 1
+        print("애매한 구간: 임계값 {:.5f} 기준 위아래 {:g}% = 점수 {:.5f} ~ {:.5f} | 구간별 이미지 수 {}".format(thr, a.band_pct, down, up, z), flush=True)
     if a.compare:
         compare_all(rows, a.out, [t.strip() for t in a.compare.split(",") if t.strip()])
         return
@@ -359,7 +428,7 @@ def main():
     if a.step in ("all", "qwen"):
         run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px, use_cache=not a.no_cache)
     if a.step in ("all", "eval"):
-        evaluate(rows, a.out)
+        evaluate(rows, a.out, band_pct=a.band_pct)
 
 
 if __name__ == "__main__":
