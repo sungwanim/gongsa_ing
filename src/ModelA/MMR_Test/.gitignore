@@ -1,0 +1,4 @@
+log_MMR_*/
+*.pth
+__pycache__/
+*.out
