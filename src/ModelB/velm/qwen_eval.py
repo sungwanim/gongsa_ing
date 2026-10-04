@@ -374,7 +374,7 @@ def main():
     p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6(짧은 원본+normal), v7(타입 특징 설명), v8(라벨 붙은 참고 이미지 60장). 결과 파일 이름에 붙음")
     p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
-    p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수 (최대 5 = 60장 전부)")
+    p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수. 제외 목록(holdout_manifest.csv)에 있는 만큼까지 사용 (지금은 그룹당 1장 = 12장)")
     p.add_argument("--ref-px", type=int, default=128, help="v8: 참고 이미지 한 장당 토큰 수 (128이면 약 128*28*28 화소). 메모리 부족이면 줄이기")
     p.add_argument("--compare", default=None, metavar="TAGS",
                    help="저장된 결과로 MMR 단독 + 여러 프롬프트를 한 표로 비교. 예: v6,v7,v8")
@@ -387,14 +387,6 @@ def main():
     a = p.parse_args()
     global TAG
     TAG = a.prompt
-    if TAG == "v8":
-        # 참고 이미지 수/크기가 기본값(그룹당 5장=60장, 128토큰)과 다르면 결과 파일 이름에 표시 (기본 결과와 섞이지 않게)
-        if a.ref_per_group != 5:
-            TAG += "_r{}".format(a.ref_per_group)
-        if a.ref_px != 128:
-            TAG += "_p{}".format(a.ref_px)
-        if TAG != "v8":
-            print("결과 파일 이름에 붙는 이름: {}".format(TAG), flush=True)
     os.makedirs(a.out, exist_ok=True)
     rows = load_mmr_csv(a.mmr_out)
     print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
@@ -421,6 +413,15 @@ def main():
             raise SystemExit("v8은 holdout 60장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
         refs = build_refs(a.holdout, a.ref_per_group)
         ref_px = a.ref_px * 28 * 28
+        # 결과 파일 이름: 기본(참고 이미지 60장, 128토큰)과 다르면 장수/크기를 이름에 붙여 기존 결과와 섞이지 않게 한다
+        suffix = ""
+        if len(refs) != 60:
+            suffix += "_n{}".format(len(refs))
+        if a.ref_px != 128:
+            suffix += "_p{}".format(a.ref_px)
+        if suffix:
+            TAG = "v8" + suffix
+            print("결과 파일 이름에 붙는 이름: {}".format(TAG), flush=True)
         # 안전장치: 판정 대상에 참고 이미지가 하나라도 남아 있으면 중단
         ref_keys = {(r["condition"], r["label"], os.path.basename(r["path"])) for r in refs}
         overlap = [r for r in rows if (r["domain"], r["folder_type"], os.path.basename(r["path"])) in ref_keys]
