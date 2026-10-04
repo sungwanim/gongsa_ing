@@ -1,4 +1,6 @@
-log_MMR_*/
 *.pth
+*.pt
+*.ckpt
+*.safetensors
 __pycache__/
 *.out
