@@ -584,6 +584,67 @@ def print_v10_sweep(rows, probs_map, bias, title):
             " / ".join("{}/{}".format(*per[k]) for k in DEF4)))
 
 
+def choose_t_by_recall(rows, probs_map, bias, target):
+    """보정용 이미지에서 시스템 재현율이 target 이상이 되는 가장 작은 normal 확률 기준값 t."""
+    grid = [0.50, 0.60, 0.70, 0.80, 0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999, 1.0001]
+    for t in grid:
+        if v10_summary(rows, probs_map, t, bias)["Recall"] >= target:
+            return t
+    return grid[-1]
+
+
+def eval_rule(a, rows, report):
+    """v10 판정 규칙으로 평가: 쏠림 보정 학습 -> t 결정(재현율 목표 또는 고정값) -> 보고용 절반으로 평가"""
+    pm = load_probs(a.out)
+    calib_rows = [r for r in rows if split_of(r) == "calib"]
+    bias = learn_type_bias(calib_rows, pm) if a.type_bias else None
+    if bias:
+        print("\n클래스별 쏠림 보정값 (보정용 절반으로 학습; 양수=그 타입을 더 고르게, 음수=덜 고르게): " +
+              ", ".join("{} {:+.2f}".format(k, v) for k, v in bias.items()))
+    if a.normal_recall:
+        t_use = choose_t_by_recall(calib_rows, pm, bias, a.normal_recall)
+        print("normal 인정 기준 t = {} (보정용 절반에서 시스템 재현율 {:.0%} 이상이 되는 가장 작은 값)".format(t_use, a.normal_recall))
+    else:
+        t_use = a.normal_thr
+        print("normal 인정 기준 t = {} (고정값)".format(t_use))
+    print_v10_sweep(report, pm, None, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 없음")
+    if bias:
+        print_v10_sweep(report, pm, bias, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 적용")
+    v10 = {"t_normal": t_use, "bias": bias}
+    print("\n===== 보고용 절반({}장) 상세 평가: normal 인정 기준 t={}, 쏠림 보정 {} [임계값/보정값은 보정용 절반으로 정함] =====".format(
+        len(report), t_use, "적용" if bias else "없음"))
+    evaluate(report, a.out, v10=v10, out_suffix="_report")
+    print("\n(참고) 전체 {}장 평가는 results/comparison_{}_all.txt 에 저장됩니다. 보정에 쓴 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
+    evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
+
+
+def run_v8_rule(a, rows):
+    """v8 방식(참고 불량 12장 + 이미지 한 장)의 Qwen 확률에 v10 판정 규칙(MMR 이중 임계값 + t + 쏠림 보정)을 적용한다.
+    MMR이 의심하는 구간 중 v8 결과가 아직 없는 이미지는 Qwen(v8)으로 추가 판정한다."""
+    global TAG
+    TAG = a.prompt                      # 예: v8_n12  (기존 v8 결과 파일을 그대로 사용)
+    calib = [r for r in rows if split_of(r) == "calib"]
+    report = [r for r in rows if split_of(r) == "report"]
+    tau_lo, tau_hi = calibrate_v10(calib, a.recall_target, a.fpr_hi)
+    mark_zones_v10(rows, tau_lo, tau_hi)
+    cnt = {}
+    for r in rows:
+        cnt[r["zone10"]] = cnt.get(r["zone10"], 0) + 1
+    print("이미지 {}장: 보정용 {} / 보고용 {} | 결과 파일 {}".format(len(rows), len(calib), len(report), "qwen_results_{}.jsonl".format(TAG)))
+    print("MMR 점수 임계값: tau_lo={:.4f} (보정용 불량의 {:.0%} 포함), tau_hi={:.4f} (정상 {:.0%}만 이 이상)".format(tau_lo, a.recall_target, tau_hi, a.fpr_hi))
+    print("구간별 이미지 수: {}".format(cnt), flush=True)
+    pm = load_probs(a.out)
+    need = [r for r in rows if r["zone10"] in ("amb", "confident") and key(r) not in pm]
+    print("Qwen(v8) 결과가 이미 있는 이미지 {}장 / 아직 없는 이미지 {}장".format(len(pm), len(need)), flush=True)
+    if a.step in ("all", "qwen") and need:
+        ref_path = os.path.join(HERE, "holdout_manifest_12.csv")        # v8 참고 이미지: 불량 12장
+        refs = build_refs(ref_path, 1)
+        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=a.ref_px * 28 * 28, use_cache=not a.no_cache,
+                 select=lambda r: r["zone10"] in ("amb", "confident"))
+    if a.step in ("all", "eval"):
+        eval_rule(a, rows, report)
+
+
 def run_v10(a, rows):
     """v10 전체 흐름: 이중 임계값(재현율 기준) -> 구간별로 Qwen(전체 사진 + 의심 부위 크롭, 정상 참고 포함) -> 평가"""
     global TAG
@@ -653,21 +714,7 @@ def run_v10(a, rows):
             return
         run_qwen(rows, a.out, a.limit, refs=refs, view_fn=view_fn, ref_views=ref_views, view_variant=a.prompt, select=sel)
     if a.step in ("all", "eval"):
-        pm = load_probs(a.out)
-        calib_rows = [r for r in rows if split_of(r) == "calib"]
-        bias = learn_type_bias(calib_rows, pm) if a.type_bias else None
-        if bias:
-            print("\n클래스별 쏠림 보정값 (보정용 절반으로 학습; 양수=그 타입을 더 고르게, 음수=덜 고르게): " +
-                  ", ".join("{} {:+.2f}".format(k, v) for k, v in bias.items()))
-        print_v10_sweep(report, pm, None, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 없음")
-        if bias:
-            print_v10_sweep(report, pm, bias, "\n[보고용 절반] normal 확률 기준 t별 결과 - 쏠림 보정 적용")
-        v10 = {"t_normal": a.normal_thr, "bias": bias}
-        print("\n===== 보고용 절반({}장) 상세 평가: normal 인정 기준 t={}, 쏠림 보정 {} [임계값/보정값은 보정용 절반으로 정함] =====".format(
-            len(report), a.normal_thr, "적용" if bias else "없음"))
-        evaluate(report, a.out, v10=v10, out_suffix="_report")
-        print("\n(참고) 전체 {}장 평가는 results/comparison_{}_all.txt 에 저장됩니다. 보정에 쓴 이미지가 섞여 있어 실제보다 좋게 보일 수 있습니다.".format(len(rows), TAG))
-        evaluate(rows, a.out, quiet=True, v10=v10, out_suffix="_all")
+        eval_rule(a, rows, report)
 
 
 def main():
@@ -695,6 +742,8 @@ def main():
     p.add_argument("--recall-info", action="store_true", help="v10: 재현율 목표별로 Qwen에 가는 이미지 비율/놓치는 불량 비율을 표로 출력하고 종료 (GPU 불필요)")
     p.add_argument("--fpr-hi", type=float, default=0.02, help="v10: '확실한 불량' 기준: 정상의 이 비율만 넘는 점수 이상 (기본 0.02)")
     p.add_argument("--normal-thr", type=float, default=0.97, help="v10: Qwen의 normal 확률이 이 값 이상일 때만 정상으로 인정 (기본 0.97, 높을수록 불량으로 판정하는 이미지가 늘어남 = 재현율 우선)")
+    p.add_argument("--v8-rule", action="store_true", help="v8 방식(참고 불량 12장)의 Qwen 확률에 v10 판정 규칙을 적용해 평가. 예: --prompt v8_n12 --v8-rule")
+    p.add_argument("--normal-recall", type=float, default=0.95, help="v10/--v8-rule: 보정용 절반에서 시스템 재현율이 이 값 이상이 되는 가장 작은 t를 자동 선택 (기본 0.95). 0이면 --normal-thr 고정값 사용")
     p.add_argument("--no-type-bias", dest="type_bias", action="store_false", help="v10: 클래스별 쏠림 보정을 끈다 (기본은 보정용 절반으로 학습해 적용)")
     p.add_argument("--max-crops", type=int, default=3, help="v11: 이미지당 최대 크롭 수 (의심 부위가 여러 곳이면 그 수만큼, 기본 최대 3)")
     p.add_argument("--crop-rel", type=float, default=0.5, help="v11: 1순위 의심 부위 점수의 이 비율보다 약한 곳은 크롭하지 않음 (기본 0.5)")
@@ -713,6 +762,11 @@ def main():
         if not os.path.exists(a.holdout):
             raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
+    if a.v8_rule:
+        if a.no_holdout:
+            raise SystemExit("--v8-rule 은 제외 목록을 써야 합니다 (--no-holdout 사용 불가)")
+        run_v8_rule(a, rows)
+        return
     if a.prompt in ("v10", "v11"):
         if a.no_holdout:
             raise SystemExit("{}은 holdout 15장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).".format(a.prompt))
