@@ -267,7 +267,9 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     rows = load_mmr_csv(a.mmr_out)
     print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
-    if not a.no_holdout and os.path.exists(a.holdout):
+    if not a.no_holdout:
+        if not os.path.exists(a.holdout):
+            raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
     refs = ref_px = None
     if TAG == "v8":
@@ -275,6 +277,12 @@ def main():
             raise SystemExit("v8은 holdout 60장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
         refs = build_refs(a.holdout, a.ref_per_group)
         ref_px = a.ref_px * 28 * 28
+        # 안전장치: 판정 대상에 참고 이미지가 하나라도 남아 있으면 중단
+        ref_keys = {(r["condition"], r["label"], os.path.basename(r["path"])) for r in refs}
+        overlap = [r for r in rows if (r["domain"], r["folder_type"], os.path.basename(r["path"])) in ref_keys]
+        print("판정 대상 {}장 / 참고 이미지와 겹치는 이미지 {}장".format(len(rows), len(overlap)), flush=True)
+        if overlap:
+            raise SystemExit("참고 이미지가 판정 대상에 섞여 있습니다. 중단합니다.")
     if a.quick:
         sub = quick_subset(rows, a.quick)
         fname = "qwen_quick_{}.jsonl".format(TAG)
