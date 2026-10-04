@@ -76,12 +76,17 @@ def load_model():
 
 
 # ============================================================
-# Prompt (최종): 원본 짧은 프롬프트 + 선택지에 normal 추가 (5지선다)
-#  - v2 결과(MMR+Qwen 비교에서 가장 균형이 좋았던 방식)와 동일한 문구
-#  - 확신도는 모델 확률로 계산 (classify_image 참고)
+# Prompts (이름으로 선택: classify_image(..., prompt="v6"))
+#  v6 : 원본 짧은 프롬프트 + 선택지에 normal 추가 (기존 결과와 동일한 문구)
+#  v7 : 타입별 특징과 판단 순서를 구체적으로 적은 프롬프트 (정상 쏠림을 줄이기 위한 개선안)
+#       특징은 MMR 저장소의 AeBAD-S 샘플 그림(assets/image/dataset_s.jpg)을 보고 작성:
+#       breakdown=동그란 구멍/점, ablation=검게 탄 자국, fracture=일부가 잘려 나감, groove=가는 틈/작은 홈
+# 확신도는 모델 확률로 계산 (classify_image 참고)
 # ============================================================
 
-PROMPT_5CLASS = f"""
+PROMPTS = {}
+
+PROMPTS["v6"] = f"""
 You are inspecting an aircraft engine blade.
 
 The blade in the image may be normal or may have one defect.
@@ -89,6 +94,33 @@ The blade in the image may be normal or may have one defect.
 Classify the image into exactly ONE of the following five classes:
 
 {chr(10).join(f"- {name}" for name in CLASSES)}
+
+Rules:
+1. Select exactly one class.
+2. Return only the class name.
+3. Do not provide an explanation.
+4. Do not return any class other than the five listed above.
+"""
+
+PROMPTS["v7"] = """
+You are inspecting an aircraft engine blade.
+
+This image was flagged as suspicious by an automatic anomaly detector. Most flagged images contain a real defect, but some are false alarms caused only by lighting, reflection, shadow, background or viewpoint changes.
+
+Classify the image into exactly ONE of the following five classes:
+
+- normal: the blade is intact. The surface is smooth and the outline is continuous, with no holes, burn marks, cuts or missing pieces. Differences in brightness, color, reflection, shadow, background, position, size or viewing angle alone are NOT defects.
+- ablation: dark, black or scorched burn marks, soot-like discoloration or burnt patches on the blade surface. The surface looks burnt or eroded by heat, while the blade outline is mostly intact.
+- breakdown: small round holes, pits or punctures in the blade surface, either a single hole or several small holes or dots, like perforations caused by impact.
+- fracture: a piece of the blade is broken off or cut away. The blade end, tip or edge is missing, so the overall outline is clearly changed and a flat or jagged broken edge is visible.
+- groove: a thin narrow slit, crack line or tiny notch cut into the blade edge or surface. It is very small, and the rest of the blade looks intact.
+
+How to decide:
+1. Look at the whole blade outline. Is a piece missing or cut off? If yes, choose fracture.
+2. Look at the surface for dark burn marks or scorched patches. If yes, choose ablation.
+3. Look for small round holes or dots in the surface. If yes, choose breakdown.
+4. Look at the edges and surface for a thin slit, crack line or tiny notch. If yes, choose groove.
+5. Do not answer normal just because the damage is small or subtle. Choose normal only if none of the above is present.
 
 Rules:
 1. Select exactly one class.
@@ -134,7 +166,7 @@ def _label_first_token_ids(processor):
     return ids
 
 
-def classify_image(image_path, model, processor):
+def classify_image(image_path, model, processor, prompt="v6"):
     """
     반환: {"label": 5클래스 중 하나 또는 "unknown",
            "confidence": 선택한 클래스의 확률 (0~1),
@@ -160,7 +192,7 @@ def classify_image(image_path, model, processor):
                 },
                 {
                     "type": "text",
-                    "text": PROMPT_5CLASS,
+                    "text": PROMPTS[prompt],
                 },
             ],
         }

@@ -18,6 +18,7 @@ from sklearn.metrics import roc_auc_score
 HERE = os.path.dirname(os.path.abspath(__file__))
 MMR_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "ModelA", "MMR_Test"))
 TYPES = ["ablation", "breakdown", "fracture", "groove"]
+TAG = "v6"      # 프롬프트 이름 (결과 파일 이름에 붙음, --prompt 로 변경)
 
 
 def load_mmr_csv(mmr_out):
@@ -48,14 +49,14 @@ def key(r):
     return r["domain"] + "|" + r["path"]
 
 
-def run_qwen(rows, out_dir, limit=None):
+def run_qwen(rows, out_dir, limit=None, subset=None, fname=None):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
-    fpath = os.path.join(out_dir, "qwen_results_v6.jsonl")
+    fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
     done = set()
     if os.path.exists(fpath):
         with open(fpath) as f:
             done = {json.loads(l)["key"] for l in f if l.strip()}
-    todo = [r for r in rows if r["pred"] == 1 and key(r) not in done]
+    todo = [r for r in (subset if subset is not None else rows) if r["pred"] == 1 and key(r) not in done]
     if limit:
         todo = todo[:limit]
     print("Qwen 대상 {}장 (이미 완료 {}장)".format(len(todo), len(done)), flush=True)
@@ -65,7 +66,7 @@ def run_qwen(rows, out_dir, limit=None):
     with open(fpath, "a") as f:
         for n, r in enumerate(todo, 1):
             try:
-                out = classify_image(resolve(r["path"]), model, processor)
+                out = classify_image(resolve(r["path"]), model, processor, prompt=TAG)
             except Exception as e:
                 out = {"label": "unknown", "confidence": 0.0, "probs": {}, "class_mass": 0.0, "raw": "ERROR: {}".format(e)}
             f.write(json.dumps({"key": key(r), "raw": out["raw"], "pred_type": out["label"],
@@ -73,6 +74,45 @@ def run_qwen(rows, out_dir, limit=None):
                                 "class_mass": out["class_mass"]}, ensure_ascii=False) + "\n")
             f.flush()
             print("[{}/{}] {} -> {} ({:.1%})".format(n, len(todo), os.path.basename(r["path"]), out["label"], out["confidence"]), flush=True)
+
+
+def quick_subset(rows, n):
+    """MMR이 불량으로 넘긴 이미지 중 (정상 포함) 타입별 n장을 고정 시드로 뽑는다 -> 프롬프트끼리 같은 이미지로 비교."""
+    import random
+    rnd = random.Random(0)
+    by = {}
+    for r in rows:
+        if r["pred"] == 1:
+            by.setdefault(r["type"], []).append(r)
+    sub = []
+    for t in ["good"] + TYPES:
+        lst = by.get(t, [])
+        sub += rnd.sample(lst, min(n, len(lst)))
+    return sub
+
+
+def quick_report(sub, out_dir, fname):
+    res = {}
+    with open(os.path.join(out_dir, fname)) as f:
+        for l in f:
+            if l.strip():
+                d = json.loads(l); res[d["key"]] = d
+    cols = ["normal"] + TYPES + ["unknown"]
+    lines = ["[빠른 시험] 프롬프트 {} / MMR이 불량으로 넘긴 이미지 중 타입별 샘플".format(TAG), "",
+             "{:>10} {:>5} | ".format("정답", "장수") + " ".join("{:>9}".format(c) for c in cols) + " | 맞힘  정상으로답함"]
+    for t in ["good"] + TYPES:
+        rs = [r for r in sub if r["type"] == t and key(r) in res]
+        if not rs:
+            continue
+        cnt = {c: sum(1 for r in rs if res[key(r)]["pred_type"] == c) for c in cols}
+        right = cnt["normal"] if t == "good" else cnt.get(t, 0)
+        lines.append("{:>10} {:>5} | ".format("정상" if t == "good" else t, len(rs)) + " ".join("{:>9}".format(cnt[c]) for c in cols)
+                     + " | {:>4.0%}  {:>6.0%}".format(right / len(rs), cnt["normal"] / len(rs)))
+    lines += ["", "해석: 정상 행은 '정상으로답함'이 높을수록 좋고, 불량 행은 '맞힘'이 높고 '정상으로답함'이 낮을수록 좋음."]
+    text = "\n".join(lines) + "\n"
+    print(text)
+    with open(os.path.join(out_dir, "quick_{}.txt".format(TAG)), "w") as f:
+        f.write(text)
 
 
 def metrics(y, pred, score=None):
@@ -90,7 +130,7 @@ def metrics(y, pred, score=None):
 
 def evaluate(rows, out_dir):
     qwen, conf = {}, {}
-    fpath = os.path.join(out_dir, "qwen_results_v6.jsonl")
+    fpath = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
     if os.path.exists(fpath):
         with open(fpath) as f:
             for l in f:
@@ -145,7 +185,7 @@ def evaluate(rows, out_dir):
     bad = [conf[key(rows[i])] for i in flagged if final[i] != typ[i]]
     m = lambda v: "{:.3f}".format(float(np.mean(v))) if v else "-"
     conf_line = "Qwen 확신도(선택한 클래스 확률) 평균: 맞힌 {}장 {} / 틀린 {}장 {}".format(len(ok), m(ok), len(bad), m(bad))
-    with open(os.path.join(out_dir, "predictions_v6.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "predictions_{}.csv".format(TAG)), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["domain", "image_path", "true_type", "mmr_score", "mmr_pred", "qwen_label", "confidence", "final"])
         for i, r in enumerate(rows):
@@ -158,11 +198,11 @@ def evaluate(rows, out_dir):
         int(pred1.sum()), len(rows), acc, unk, conf_line)
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
     print(text)
-    with open(os.path.join(out_dir, "comparison_v6.txt"), "w") as f:
+    with open(os.path.join(out_dir, "comparison_{}.txt".format(TAG)), "w") as f:
         f.write(text)
-    with open(os.path.join(out_dir, "comparison_v6.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "comparison_{}.csv".format(TAG)), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
-    print("저장: {}/comparison_v6.txt, comparison_v6.csv, predictions_v6.csv".format(out_dir))
+    print("저장: {0}/comparison_{1}.txt, comparison_{1}.csv, predictions_{1}.csv".format(out_dir, TAG))
 
 
 def main():
@@ -172,10 +212,21 @@ def main():
     p.add_argument("--out", default=os.path.join(HERE, "results"))
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
+    p.add_argument("--prompt", default="v6", help="사용할 프롬프트 이름 (run_qwen.py의 PROMPTS: v6, v7). 결과 파일 이름에 붙음")
+    p.add_argument("--quick", type=int, default=None, metavar="N",
+                   help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
+    global TAG
+    TAG = a.prompt
     os.makedirs(a.out, exist_ok=True)
     rows = load_mmr_csv(a.mmr_out)
-    print("MMR 결과 {}장 로드".format(len(rows)))
+    print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
+    if a.quick:
+        sub = quick_subset(rows, a.quick)
+        fname = "qwen_quick_{}.jsonl".format(TAG)
+        run_qwen(rows, a.out, subset=sub, fname=fname)
+        quick_report(sub, a.out, fname)
+        return
     if a.step in ("all", "qwen"):
         run_qwen(rows, a.out, a.limit)
     if a.step in ("all", "eval"):
