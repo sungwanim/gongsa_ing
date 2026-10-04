@@ -339,7 +339,12 @@ def _result_from_logits(first_logits, processor):
     log_probs = torch.log_softmax(first_logits.float(), dim=-1)
     top_id = int(torch.argmax(log_probs))
     raw = tok.decode([top_id]).strip().lower()
-    label = validate_result(raw)
+    # 첫 토큰은 단어의 '조각'이다 (예: ablation -> "abl"). 글자로 바꿔 비교하지 말고 어느 클래스 단어의 첫 조각인지로 정한다.
+    label = "unknown"
+    for name, id_list in label_ids.items():
+        if top_id in id_list:
+            label = name
+            break
     class_prob = {
         name: torch.logsumexp(log_probs[id_list], dim=0).exp().item()
         for name, id_list in label_ids.items()
