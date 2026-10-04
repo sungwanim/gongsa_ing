@@ -170,7 +170,7 @@ def metrics(y, pred, score=None):
             "F1": d(2 * p * r, p + r), "TP": tp, "FN": fn, "FP": fp, "TN": tn, "ImageAUROC": auc}
 
 
-def evaluate(rows, out_dir):
+def evaluate(rows, out_dir, quiet=False):
     qwen, conf = {}, {}
     fpath = os.path.join(out_dir, "qwen_results_{}.jsonl".format(TAG))
     if os.path.exists(fpath):
@@ -239,12 +239,58 @@ def evaluate(rows, out_dir):
             "AUROC는 MMR 점수 기준. Pixel AUROC / PRO 는 Qwen이 이상 맵을 바꾸지 않으므로 MMR 로그 값과 같음.").format(
         int(pred1.sum()), len(rows), acc, unk, conf_line)
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
-    print(text)
+    if not quiet:
+        print(text)
     with open(os.path.join(out_dir, "comparison_{}.txt".format(TAG)), "w") as f:
         f.write(text)
     with open(os.path.join(out_dir, "comparison_{}.csv".format(TAG)), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
-    print("저장: {0}/comparison_{1}.txt, comparison_{1}.csv, predictions_{1}.csv".format(out_dir, TAG))
+    if not quiet:
+        print("저장: {0}/comparison_{1}.txt, comparison_{1}.csv, predictions_{1}.csv".format(out_dir, TAG))
+    return out, {"type_acc": acc, "unknown": unk, "conf_line": conf_line}
+
+
+def compare_all(rows, out_dir, tags):
+    """MMR 단독 + 프롬프트별(MMR+Qwen) 결과를 한 표로 비교. 각 프롬프트의 qwen_results_<tag>.jsonl 이 필요."""
+    global TAG
+    res = {}
+    for t in tags:
+        TAG = t
+        res[t] = evaluate(rows, out_dir, quiet=True)
+    cols = ["scope", "model", "n_good", "n_defect", "Accuracy", "Precision", "Recall", "FPR", "F1", "TP", "FN", "FP", "TN"]
+    first = res[tags[0]][0]
+    table = []
+    scopes = []
+    for r in first:
+        if r["scope"] not in scopes:
+            scopes.append(r["scope"])
+    for sc in scopes:
+        table.append(next(r for r in first if r["scope"] == sc and r["model"] == "MMR"))
+        for t in tags:
+            row = dict(next(r for r in res[t][0] if r["scope"] == sc and r["model"] == "MMR+Qwen"))
+            row["model"] = "MMR+Qwen({})".format(t)
+            table.append(row)
+    f4 = lambda v: "{:.4f}".format(v) if isinstance(v, float) else str(v)
+    w = [max(len(c), max(len(f4(r[c])) for r in table)) for c in cols]
+    lines = [" | ".join(c.ljust(w[i]) for i, c in enumerate(cols)), "-+-".join("-" * x for x in w)]
+    prev = None
+    for r in table:
+        if prev is not None and r["scope"] != prev:
+            lines.append("")
+        prev = r["scope"]
+        lines.append(" | ".join(f4(r[c]).ljust(w[i]) for i, c in enumerate(cols)))
+    foot = ["", "[프롬프트별 불량 타입 분류 정확도(MMR이 잡은 진짜 불량 기준) / unknown 수 / Qwen 확신도]"]
+    for t in tags:
+        x = res[t][1]
+        foot.append("  {}: 타입 정확도 {:.4f}, unknown {}장 | {}".format(t, x["type_acc"], x["unknown"], x["conf_line"]))
+    head = "평가 대상 {}장 (holdout 60장 제외). 프롬프트: {}\n".format(len(rows), ", ".join(tags)).replace("\\n", "\n")
+    text = head + "\n" + "\n".join(lines) + "\n" + "\n".join(foot) + "\n"
+    print(text)
+    with open(os.path.join(out_dir, "comparison_all.txt"), "w") as fh:
+        fh.write(text)
+    with open(os.path.join(out_dir, "comparison_all.csv"), "w", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore"); wr.writeheader(); wr.writerows(table)
+    print("저장: {0}/comparison_all.txt, comparison_all.csv".format(out_dir))
 
 
 def main():
@@ -259,6 +305,8 @@ def main():
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
     p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수 (최대 5 = 60장 전부)")
     p.add_argument("--ref-px", type=int, default=128, help="v8: 참고 이미지 한 장당 토큰 수 (128이면 약 128*28*28 화소). 메모리 부족이면 줄이기")
+    p.add_argument("--compare", default=None, metavar="TAGS",
+                   help="저장된 결과로 MMR 단독 + 여러 프롬프트를 한 표로 비교. 예: v6,v7,v8")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -271,6 +319,9 @@ def main():
         if not os.path.exists(a.holdout):
             raise SystemExit("제외 목록 파일이 없습니다: {} (제외 없이 평가하려면 --no-holdout)".format(a.holdout))
         rows = apply_holdout(rows, a.holdout)
+    if a.compare:
+        compare_all(rows, a.out, [t.strip() for t in a.compare.split(",") if t.strip()])
+        return
     refs = ref_px = None
     if TAG == "v8":
         if a.no_holdout:
