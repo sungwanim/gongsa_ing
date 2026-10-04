@@ -75,6 +75,40 @@ def compute_imagewise_retrieval_metrics(
     return {"auroc": auroc, "fpr": fpr, "tpr": tpr, "threshold": thresholds}
 
 
+def best_f1_threshold(scores, labels):
+    """Image score threshold that maximizes F1 on the given (scores, labels)."""
+    precision, recall, thresholds = metrics.precision_recall_curve(np.asarray(labels).astype(int), scores)
+    f1 = np.divide(2 * precision * recall, precision + recall,
+                   out=np.zeros_like(precision), where=(precision + recall) != 0)
+    # the last (precision, recall) pair has no threshold
+    return float(thresholds[np.argmax(f1[:-1])])
+
+
+def compute_image_classification_metrics(scores, labels, threshold):
+    """
+    Good(0) / defect(1) classification at a fixed image score threshold.
+    An image is predicted as defect when score >= threshold.
+    """
+    labels = np.asarray(labels).astype(int)
+    predictions = (np.asarray(scores) >= threshold).astype(int)
+    tn, fp, fn, tp = metrics.confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
+
+    def _div(a, b):
+        return float(a) / b if b > 0 else 0.0
+
+    precision = _div(tp, tp + fp)
+    recall = _div(tp, tp + fn)
+    return {
+        "threshold": threshold,
+        "TP": int(tp), "FP": int(fp), "FN": int(fn), "TN": int(tn),
+        "recall": recall,
+        "fpr": _div(fp, fp + tn),
+        "precision": precision,
+        "f1": _div(2 * precision * recall, precision + recall),
+        "accuracy": _div(tp + tn, tp + fp + fn + tn),
+    }
+
+
 def compute_pixelwise_retrieval_metrics(anomaly_segmentations, ground_truth_masks):
     """
     Computes pixel-wise statistics (AUROC, FPR, TPR) for anomaly segmentations

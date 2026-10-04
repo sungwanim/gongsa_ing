@@ -169,10 +169,20 @@ class MMR_pipeline_:
                                          individual_dataloader=test_dataloader
                                          )
 
-        return auroc_samples, auroc_pixel, round(np.mean(aupro_list), 3)
+        return {"image_auroc": auroc_samples,
+                "pixel_auroc": auroc_pixel,
+                "pro": round(np.mean(aupro_list), 3),
+                # per-image results for threshold-based classification metrics
+                "image_scores": np.array(labels_prediction, dtype=np.float64),
+                "image_labels": np.array(labels_gt, dtype=int),
+                "image_paths": ima_path}
 
-    def save_model(self):
-        pass
+    def save_model(self, path):
+        # only the MMR model is trained; the WideResNet teacher stays at ImageNet weights
+        torch.save(self.mmr_model.state_dict(), path)
+        LOGGER.info("MMR model saved to {}".format(path))
 
-    def load_model(self):
-        pass
+    def load_model(self, path):
+        state_dict = torch.load(path, map_location=self.device)
+        self.mmr_model.load_state_dict(state_dict)
+        LOGGER.info("MMR model loaded from {}".format(path))

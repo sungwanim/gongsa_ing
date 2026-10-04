@@ -6,7 +6,7 @@ import pprint
 
 from utils import setup_logging, load_config, parse_args
 
-from tools import train
+from tools import train, test
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ def main():
              4) complete training: start test (one follow by one)
             """
             train(cfg=cfg)
+        elif cfg.TEST.enable:
+            # evaluation only, from the trained checkpoint in TEST.checkpoint
+            LOGGER.info("start test!")
+            test(cfg=cfg)
 
         LOGGER.info("Main function complete!")
 

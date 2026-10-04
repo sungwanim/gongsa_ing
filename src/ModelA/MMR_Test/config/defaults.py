@@ -71,6 +71,11 @@ _C.TEST.method = 'PatchCore'
 _C.TEST.save_segmentation_images = False
 _C.TEST.save_video_segmentation_images = False
 _C.TEST.dataset_path = '/usr/sdd/zzl_data/MV_Tec'
+# evaluation-only mode (TRAIN.enable False, TEST.enable True) loads this MMR checkpoint
+_C.TEST.checkpoint = ''
+# image-level good/defect threshold; < 0 means best-F1 threshold on the first
+# measured domain ("same" for AeBAD-S), then reused for every other domain
+_C.TEST.image_threshold = -1.0
 
 _C.TEST.VISUALIZE = CfgNode()
 _C.TEST.VISUALIZE.Random_sample = True

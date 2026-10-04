@@ -12,7 +12,7 @@ DATASET:
 
 TRAIN:
   enable: True
-  save_model: False
+  save_model: True
   method: 'MMR'
   dataset_path: '../../../AeBAD'
   backbone: 'wideresnet50'
