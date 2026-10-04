@@ -385,30 +385,32 @@ class CachedRefClassifier:
                                 padding=True, return_tensors="pt")
         return inputs.to(self.device)
 
-    def _rope(self, ids, grid, mask):
+    def _rope(self, ids, grid, mask, mm):
+        # transformers 5.x: get_rope_index(input_ids, mm_token_type_ids, image_grid_thw, video_grid_thw, attention_mask)
         fn = getattr(self.model, "get_rope_index", None) or getattr(self.model.model, "get_rope_index")
-        out = fn(input_ids=ids, image_grid_thw=grid, video_grid_thw=None, attention_mask=mask)
+        out = fn(input_ids=ids, mm_token_type_ids=mm, image_grid_thw=grid, video_grid_thw=None, attention_mask=mask)
         return out[0] if isinstance(out, tuple) else out
 
     def _cached_logits(self, inputs):
         ids, grid, pv = inputs["input_ids"], inputs["image_grid_thw"], inputs["pixel_values"]
         T = ids.shape[1]
+        mm = inputs["mm_token_type_ids"]                              # 프로세서가 같이 돌려줌 (글자 0 / 이미지 1)
         mask = torch.ones_like(ids)
-        pos = self._rope(ids, grid, mask)
+        pos = self._rope(ids, grid, mask, mm)
         L = int((ids[0] == self.vision_start).nonzero()[-1])         # 마지막 이미지(검사 이미지) 시작 위치
         with torch.no_grad():
             if self.cache is None:                                    # 참고 이미지 부분: 처음 한 번만 계산
                 self.n_ref_patch = int(grid[:self.n_ref].prod(-1).sum())
                 out = self.model(input_ids=ids[:, :L], attention_mask=mask[:, :L],
                                  pixel_values=pv[:self.n_ref_patch], image_grid_thw=grid[:self.n_ref],
-                                 position_ids=pos[:, :, :L], use_cache=True)
+                                 position_ids=pos[:, :, :L], use_cache=True, logits_to_keep=1)
                 self.cache, self.prefix_ids, self.L = out.past_key_values, ids[:, :L].clone(), L
             elif L != self.L or not torch.equal(ids[:, :L], self.prefix_ids):
                 raise RuntimeError("참고 이미지 부분이 이전과 달라 캐시를 쓸 수 없습니다")
             out = self.model(input_ids=ids[:, L:], attention_mask=mask,
                              pixel_values=pv[self.n_ref_patch:], image_grid_thw=grid[self.n_ref:],
                              position_ids=pos[:, :, L:], past_key_values=self.cache,
-                             cache_position=torch.arange(L, T, device=self.device), use_cache=True)
+                             use_cache=True, logits_to_keep=1)
         self.cache.crop(self.L)                                       # 검사 이미지 부분은 지우고 참고 이미지 부분만 남김
         return out.logits[0, -1].float()
 
