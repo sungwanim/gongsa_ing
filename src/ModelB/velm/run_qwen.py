@@ -130,6 +130,52 @@ Rules:
 """
 
 
+# v8 : 라벨이 붙은 참고 이미지(결함 60장: 촬영 조건 + 결함 타입)를 먼저 보여주고 판정시키는 방식
+#      (참고 이미지는 평가에서 제외된 holdout 60장. classify_image(..., refs=[...]) 로 전달)
+V8_HEAD = """You are inspecting an aircraft engine blade.
+
+First you will see labeled reference examples of DEFECTIVE blades. Each example states how the photo was taken (different background, different lighting, or different camera view) and which defect it shows.
+The same defect type can look different under different conditions and on different blades, so learn what each defect looks like instead of matching exact pixels.
+"""
+
+V8_TAIL = """Now classify the inspection image that follows into exactly ONE of the following five classes:
+
+{class_list}
+
+normal means the blade has none of the defects shown in the reference examples. Differences in brightness, color, reflection, shadow or background alone are not defects.
+
+Rules:
+1. Select exactly one class.
+2. Return only the class name.
+3. Do not provide an explanation.
+4. Do not return any class other than the five listed above.
+"""
+
+CONDITION_TEXT = {
+    "background": "different background",
+    "illumination": "different lighting",
+    "view": "different camera view",
+}
+
+
+def build_ref_content(refs, ref_max_pixels):
+    """refs: [{"path", "label", "condition"}]  ->  메시지 content 조각 리스트"""
+    content = [{"type": "text", "text": V8_HEAD}]
+    for i, r in enumerate(refs, 1):
+        content.append({
+            "type": "text",
+            "text": "Reference example {}: {}, defect = {}".format(
+                i, CONDITION_TEXT.get(r["condition"], r["condition"]), r["label"]),
+        })
+        item = {"type": "image", "image": r["path"]}
+        if ref_max_pixels:
+            item["max_pixels"] = ref_max_pixels      # 예시 이미지는 작게 (토큰/메모리 절약)
+        content.append(item)
+    content.append({"type": "text", "text": V8_TAIL.format(class_list="\n".join("- " + c for c in CLASSES))})
+    content.append({"type": "text", "text": "Inspection image:"})
+    return content
+
+
 # ============================================================
 # Defect classification (label + confidence)
 # ============================================================
@@ -166,7 +212,7 @@ def _label_first_token_ids(processor):
     return ids
 
 
-def classify_image(image_path, model, processor, prompt="v6"):
+def classify_image(image_path, model, processor, prompt="v6", refs=None, ref_max_pixels=None):
     """
     반환: {"label": 5클래스 중 하나 또는 "unknown",
            "confidence": 선택한 클래스의 확률 (0~1),
@@ -182,21 +228,27 @@ def classify_image(image_path, model, processor, prompt="v6"):
             f"이미지 파일을 찾을 수 없습니다: {image_path}"
         )
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "image": image_path,
-                },
-                {
-                    "type": "text",
-                    "text": PROMPTS[prompt],
-                },
-            ],
-        }
-    ]
+    if refs:
+        content = build_ref_content(refs, ref_max_pixels)
+        content.append({"type": "image", "image": image_path})
+        content.append({"type": "text", "text": "Answer with only the class name."})
+        messages = [{"role": "user", "content": content}]
+    else:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": image_path,
+                    },
+                    {
+                        "type": "text",
+                        "text": PROMPTS[prompt],
+                    },
+                ],
+            }
+        ]
 
     # Qwen chat template
     text = processor.apply_chat_template(

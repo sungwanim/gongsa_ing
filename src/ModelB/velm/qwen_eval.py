@@ -18,6 +18,7 @@ from sklearn.metrics import roc_auc_score
 HERE = os.path.dirname(os.path.abspath(__file__))
 MMR_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "ModelA", "MMR_Test"))
 TYPES = ["ablation", "breakdown", "fracture", "groove"]
+REPO_ROOT = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
 HOLDOUT = os.path.join(HERE, "holdout_manifest.csv")   # 평가에서 제외할 60장 (test 이미지 중 따로 뺀 것)
 TAG = "v6"      # 프롬프트 이름 (결과 파일 이름에 붙음, --prompt 로 변경)
 
@@ -58,6 +59,27 @@ def apply_holdout(rows, path):
     return kept
 
 
+def build_refs(manifest, per_group):
+    """holdout 60장을 (촬영 조건 + 결함 타입) 라벨이 붙은 참고 이미지 목록으로 만든다. 그룹(조건,타입)당 per_group장, 고정 시드로 섞음."""
+    import random
+    groups = {}
+    with open(manifest, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            path = os.path.join(REPO_ROOT, r["original_path"])
+            groups.setdefault((r["domain"], r["defect"]), []).append(
+                {"path": path, "label": r["defect"], "condition": r["domain"]})
+    refs = []
+    for k in sorted(groups):
+        refs += sorted(groups[k], key=lambda x: x["path"])[:per_group]
+    missing = [r["path"] for r in refs if not os.path.isfile(r["path"])]
+    if missing:
+        raise SystemExit("참고 이미지 {}장을 찾을 수 없습니다 (예: {}). AeBAD가 {} 아래에 있는지 확인하세요.".format(
+            len(missing), missing[0], REPO_ROOT))
+    random.Random(0).shuffle(refs)
+    print("참고 이미지 {}장 사용 (라벨: 촬영 조건 + 결함 타입)".format(len(refs)), flush=True)
+    return refs
+
+
 def resolve(path):
     if os.path.isfile(path):
         return path
@@ -69,7 +91,7 @@ def key(r):
     return r["domain"] + "|" + r["path"]
 
 
-def run_qwen(rows, out_dir, limit=None, subset=None, fname=None):
+def run_qwen(rows, out_dir, limit=None, subset=None, fname=None, refs=None, ref_px=None):
     from run_qwen import load_model, classify_image   # velm 코드 그대로 사용
     fpath = os.path.join(out_dir, fname or "qwen_results_{}.jsonl".format(TAG))
     done = set()
@@ -86,7 +108,7 @@ def run_qwen(rows, out_dir, limit=None, subset=None, fname=None):
     with open(fpath, "a") as f:
         for n, r in enumerate(todo, 1):
             try:
-                out = classify_image(resolve(r["path"]), model, processor, prompt=TAG)
+                out = classify_image(resolve(r["path"]), model, processor, prompt=TAG, refs=refs, ref_max_pixels=ref_px)
             except Exception as e:
                 out = {"label": "unknown", "confidence": 0.0, "probs": {}, "class_mass": 0.0, "raw": "ERROR: {}".format(e)}
             f.write(json.dumps({"key": key(r), "raw": out["raw"], "pred_type": out["label"],
@@ -232,9 +254,11 @@ def main():
     p.add_argument("--out", default=os.path.join(HERE, "results"))
     p.add_argument("--step", default="all", choices=["all", "qwen", "eval"])
     p.add_argument("--limit", type=int, default=None, help="테스트용: Qwen 호출 장수 제한")
-    p.add_argument("--prompt", default="v6", help="사용할 프롬프트 이름 (run_qwen.py의 PROMPTS: v6, v7). 결과 파일 이름에 붙음")
+    p.add_argument("--prompt", default="v6", help="프롬프트 이름: v6(짧은 원본+normal), v7(타입 특징 설명), v8(라벨 붙은 참고 이미지 60장). 결과 파일 이름에 붙음")
     p.add_argument("--holdout", default=HOLDOUT, help="평가에서 제외할 이미지 목록 csv (기본: holdout_manifest.csv)")
     p.add_argument("--no-holdout", action="store_true", help="제외 없이 전체로 평가")
+    p.add_argument("--ref-per-group", type=int, default=5, help="v8: (촬영 조건, 결함 타입) 그룹당 참고 이미지 수 (최대 5 = 60장 전부)")
+    p.add_argument("--ref-px", type=int, default=128, help="v8: 참고 이미지 한 장당 토큰 수 (128이면 약 128*28*28 화소). 메모리 부족이면 줄이기")
     p.add_argument("--quick", type=int, default=None, metavar="N",
                    help="빠른 프롬프트 시험: MMR이 불량으로 넘긴 이미지 중 타입별(정상 포함) N장만 돌려서 정답 분포를 출력")
     a = p.parse_args()
@@ -245,14 +269,20 @@ def main():
     print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
     if not a.no_holdout and os.path.exists(a.holdout):
         rows = apply_holdout(rows, a.holdout)
+    refs = ref_px = None
+    if TAG == "v8":
+        if a.no_holdout:
+            raise SystemExit("v8은 holdout 60장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
+        refs = build_refs(a.holdout, a.ref_per_group)
+        ref_px = a.ref_px * 28 * 28
     if a.quick:
         sub = quick_subset(rows, a.quick)
         fname = "qwen_quick_{}.jsonl".format(TAG)
-        run_qwen(rows, a.out, subset=sub, fname=fname)
+        run_qwen(rows, a.out, subset=sub, fname=fname, refs=refs, ref_px=ref_px)
         quick_report(sub, a.out, fname)
         return
     if a.step in ("all", "qwen"):
-        run_qwen(rows, a.out, a.limit)
+        run_qwen(rows, a.out, a.limit, refs=refs, ref_px=ref_px)
     if a.step in ("all", "eval"):
         evaluate(rows, a.out)
 
