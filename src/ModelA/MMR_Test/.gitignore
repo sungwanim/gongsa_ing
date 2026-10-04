@@ -4,3 +4,6 @@
 *.safetensors
 __pycache__/
 *.out
+image_save/
+video_save/
+*.npz

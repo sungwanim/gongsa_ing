@@ -175,7 +175,9 @@ class MMR_pipeline_:
                 # per-image results for threshold-based classification metrics
                 "image_scores": np.array(labels_prediction, dtype=np.float64),
                 "image_labels": np.array(labels_gt, dtype=int),
-                "image_paths": ima_path}
+                "image_paths": ima_path,
+                # raw (un-normalized) per-image anomaly maps, after gaussian smoothing; (N, imagesize, imagesize)
+                "anomaly_maps": masks_prediction.astype(np.float32)}
 
     def save_model(self, path):
         # only the MMR model is trained; the WideResNet teacher stays at ImageNet weights

@@ -147,6 +147,15 @@ def _evaluate_domains(cfg, MMR_instance, measured_list, test_dataloader_dict, id
                       "prediction": (result["image_scores"] >= threshold).astype(int)}).to_csv(scores_path, index=False)
         LOGGER.info("image scores saved to {}".format(scores_path))
 
+        # raw anomaly score and anomaly map of every image (rows align with the csv above)
+        maps_path = os.path.join(cfg.OUTPUT_DIR, "anomaly_maps_{}_{}.npz".format(dataloader_name, each_class))
+        np.savez_compressed(maps_path,
+                            image_paths=np.array(result["image_paths"]),
+                            labels=result["image_labels"],
+                            scores=result["image_scores"],
+                            anomaly_maps=result["anomaly_maps"])
+        LOGGER.info("anomaly scores and maps saved to {}".format(maps_path))
+
 
 def _log_mean_results(result_collect):
     for key, values in result_collect.items():
