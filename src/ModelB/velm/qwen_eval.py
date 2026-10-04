@@ -387,6 +387,14 @@ def main():
     a = p.parse_args()
     global TAG
     TAG = a.prompt
+    if TAG == "v8":
+        # 참고 이미지 수/크기가 기본값(그룹당 5장=60장, 128토큰)과 다르면 결과 파일 이름에 표시 (기본 결과와 섞이지 않게)
+        if a.ref_per_group != 5:
+            TAG += "_r{}".format(a.ref_per_group)
+        if a.ref_px != 128:
+            TAG += "_p{}".format(a.ref_px)
+        if TAG != "v8":
+            print("결과 파일 이름에 붙는 이름: {}".format(TAG), flush=True)
     os.makedirs(a.out, exist_ok=True)
     rows = load_mmr_csv(a.mmr_out)
     print("MMR 결과 {}장 로드 / 프롬프트 {}".format(len(rows), TAG))
@@ -408,7 +416,7 @@ def main():
         compare_all(rows, a.out, [t.strip() for t in a.compare.split(",") if t.strip()])
         return
     refs = ref_px = None
-    if TAG == "v8":
+    if a.prompt == "v8":
         if a.no_holdout:
             raise SystemExit("v8은 holdout 60장을 참고 이미지로 쓰므로 --no-holdout 과 함께 쓸 수 없습니다 (평가 오염).")
         refs = build_refs(a.holdout, a.ref_per_group)
