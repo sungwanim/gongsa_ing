@@ -446,10 +446,18 @@ class CachedRefClassifier:
                     print("[캐시 확인 실패] 전체 계산과 결과가 다릅니다 (top1 같음={}, 최대 차이 {:.3f}) -> 기존 방식으로 진행".format(same_top, diff), flush=True)
                     return self._fallback(image_path)
             self.n_cached += 1
+            if self.n_cached in (1, 5):
+                print("[메모리] 우리 프로세스 현재 {:.2f} GiB / 최대 {:.2f} GiB (GPU 조각 전체 16 GiB)".format(
+                    torch.cuda.memory_allocated() / 1024 ** 3, torch.cuda.max_memory_allocated() / 1024 ** 3), flush=True)
             return _result_from_logits(cached, self.processor)
         except Exception as e:
             self.state = "off"
-            print("[캐시 사용 불가] {}: {} -> 기존 방식(전부 다시 계산)으로 진행".format(type(e).__name__, str(e)[:200]), flush=True)
+            try:
+                print("[메모리] 실패 시점 우리 프로세스 현재 {:.2f} GiB / 최대 {:.2f} GiB (GPU 조각 전체 16 GiB)".format(
+                    torch.cuda.memory_allocated() / 1024 ** 3, torch.cuda.max_memory_allocated() / 1024 ** 3), flush=True)
+            except Exception:
+                pass
+            print("[캐시 사용 불가] {}: {} -> 기존 방식(전부 다시 계산)으로 진행".format(type(e).__name__, str(e)[:800]), flush=True)
             return self._fallback(image_path)
 
 
