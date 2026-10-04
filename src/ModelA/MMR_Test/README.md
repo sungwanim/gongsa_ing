@@ -109,6 +109,7 @@ bash src/ModelA/MMR_Test/AeBAD_S_run.sh TRAIN_SETUPS.num_workers 6
 # 세션에서 빠져나오기: Ctrl+B 누른 뒤 d  (학습은 계속됨)
 ```
 
+- 학습 중에는 `tqdm` 진행 막대가 epoch 진행률, 경과/남은 시간(ETA), 최근 loss를 보여준다. (`train: 45%|... 90/200 [22:30<27:30, loss=0.1234]`)
 - 다시 접속해서 `tmux attach -t mmr`로 진행 상황을 본다. 세션 목록은 `tmux ls`.
 - 로그는 터미널과 `log_MMR_AeBAD_S_54/*.log`에 함께 남는다. 스크롤은 `Ctrl+B` 다음 `[` (나갈 때 `q`).
 - 실행 중인지 확인: `ps aux | grep "[m]ain.py"`
@@ -214,6 +215,7 @@ d["anomaly_maps"][i], d["scores"][i], d["image_paths"][i]   # i번째 이미지
 | `main.py`, `utils/parser_.py` | `--device` 미지정 시 `CUDA_VISIBLE_DEVICES` 유지 | MIG 환경 대응 |
 | `method_config/AeBAD_S/MMR.yaml` | 데이터/MAE 경로, `save_model: True` | 팀 경로 규칙, 가중치 저장 |
 | `AeBAD_S_run.sh` | 스크립트 폴더로 `cd`, 추가 옵션 전달 | 어디서 실행해도 상대경로 유지 |
+| `models/MMR/MMR_pipeline.py`, `requirements.txt` | 학습 루프에 `tqdm` 진행 막대(ETA·loss) 추가 | 학습 남은 시간 확인 |
 | `models/MMR/MMR_pipeline.py`, `tools/train.py` | 평가 결과에 원본 anomaly map 포함, 이미지별 score·map을 `.npz`로 저장 | 히트맵 생성 전 원본 값 확보 |
 | `models/MMR/MMR_pipeline.py` | `save_model`/`load_model` 구현, `evaluation()`이 이미지별 점수 반환 | 원본은 가중치를 저장하지 않음 |
 | `tools/train.py`, `main.py` | 평가 전용 `test()` 추가, 이미지 분류 지표·점수 CSV 저장 | 1차 검사용 판정 지표 필요 |
