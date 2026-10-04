@@ -1,7 +1,7 @@
-"""MMR(1차) 결과를 받아 Qwen(2차)로 불량 타입을 분류하고, MMR vs MMR+Qwen 지표를 비교한다.
+"""MMR(1차) 결과를 받아 Qwen(2차)로 normal/불량 4타입 중 하나를 고르게 하고, MMR vs MMR+Qwen 지표를 비교한다.
 
 입력 : MMR이 저장한 image_scores_*.csv (image_path,label,score,prediction)  -> MMR 코드는 수정하지 않음
-2차  : MMR이 불량(prediction=1)으로 본 이미지만 run_qwen.py 로 4개 타입 분류 (정상 판정은 Qwen이 하지 않음)
+2차  : MMR이 불량(prediction=1)으로 본 이미지만 run_qwen.py 로 normal + 4개 타입 중 하나 선택
 지표 : Accuracy / Precision / Recall / FPR / F1 / 혼동행렬 / Image AUROC (MMR만)
        전체(양품 vs 불량) 1회 + 불량 타입별(해당 타입 + 모든 양품) 각각
        * Pixel AUROC / PRO 는 Qwen이 이상 맵을 바꾸지 않으므로 MMR 로그 값을 그대로 사용
@@ -50,7 +50,7 @@ def key(r):
 
 def run_qwen(rows, out_dir, limit=None):
     from run_qwen import load_model, classify_image, validate_result   # velm 코드 그대로 사용
-    fpath = os.path.join(out_dir, "qwen_results.jsonl")
+    fpath = os.path.join(out_dir, "qwen_results_v2.jsonl")
     done = set()
     if os.path.exists(fpath):
         with open(fpath) as f:
@@ -89,12 +89,12 @@ def metrics(y, pred, score=None):
 
 def evaluate(rows, out_dir):
     qwen = {}
-    fpath = os.path.join(out_dir, "qwen_results.jsonl")
+    fpath = os.path.join(out_dir, "qwen_results_v2.jsonl")
     if os.path.exists(fpath):
         with open(fpath) as f:
             for l in f:
                 if l.strip():
-                    d = json.loads(l); qwen[d["key"]] = d["pred_type"]
+                    d = json.loads(l); qwen[d["key"]] = "good" if d["pred_type"] == "normal" else d["pred_type"]
     final = []                       # MMR+Qwen 최종 라벨: good 또는 타입
     for r in rows:
         if r["pred"] == 0:
@@ -106,7 +106,7 @@ def evaluate(rows, out_dir):
     final = np.array(final)
     y = np.array([r["label"] for r in rows]); pred1 = np.array([r["pred"] for r in rows])
     score = np.array([r["score"] for r in rows]); typ = np.array([r["type"] for r in rows])
-    pred2 = (final != "good").astype(int)       # Qwen은 정상 판정을 하지 않으므로 이진 판정은 MMR과 동일
+    pred2 = (final != "good").astype(int)       # MMR이 불량으로 봤어도 Qwen이 normal이면 정상으로 뒤집음
 
     scopes = [("전체 (양품 vs 불량)", np.arange(len(rows)), None)]
     for t in sorted(set(typ.tolist()) - {"good"}):
@@ -136,16 +136,16 @@ def evaluate(rows, out_dir):
     dm = (y == 1) & (pred1 == 1)
     acc = float((final[dm] == typ[dm]).mean()) if dm.any() else 0.0
     unk = int((final == "unknown").sum())
-    head = ("MMR 불량 판정 {}/{}장 -> Qwen 2차 | 불량 타입 분류 정확도(MMR이 잡은 진짜 불량 기준) {:.4f} | unknown {}장\n"
+    head = ("MMR 불량 판정 {}/{}장 -> Qwen 2차(normal 선택 가능, 정상으로 뒤집은 수는 아래 혼동행렬 good 열) | 불량 타입 분류 정확도(MMR이 잡은 진짜 불량 기준) {:.4f} | unknown {}장\n"
             "AUROC는 MMR 점수 기준. Pixel AUROC / PRO 는 Qwen이 이상 맵을 바꾸지 않으므로 MMR 로그 값과 같음.").format(
         int(pred1.sum()), len(rows), acc, unk)
     text = head + "\n\n" + "\n".join(lines) + "\n" + "\n".join(cm) + "\n"
     print(text)
-    with open(os.path.join(out_dir, "comparison.txt"), "w") as f:
+    with open(os.path.join(out_dir, "comparison_v2.txt"), "w") as f:
         f.write(text)
-    with open(os.path.join(out_dir, "comparison.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "comparison_v2.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols); wr.writeheader(); wr.writerows(out)
-    print("저장: {}/comparison.txt, comparison.csv".format(out_dir))
+    print("저장: {}/comparison_v2.txt, comparison_v2.csv".format(out_dir))
 
 
 def main():

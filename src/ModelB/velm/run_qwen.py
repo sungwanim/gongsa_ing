@@ -25,6 +25,9 @@ DEFECT_CLASSES = [
     "groove",
 ]
 
+# MMR(1차)이 애매하게 불량으로 넘긴 이미지도 다시 검증하므로 "normal"(정상)도 선택지에 포함
+CLASSES = ["normal"] + DEFECT_CLASSES
+
 
 # ============================================================
 # Load Qwen2-VL
@@ -84,15 +87,15 @@ def classify_image(image_path, model, processor):
         )
 
     defect_list = "\n".join(
-        [f"- {name}" for name in DEFECT_CLASSES]
+        [f"- {name}" for name in CLASSES]
     )
 
     prompt = f"""
 You are inspecting an aircraft engine blade.
 
-The image contains an anomalous blade.
+The blade in the image may be normal or may have one defect.
 
-Classify the defect into exactly ONE of the following four classes:
+Classify the image into exactly ONE of the following five classes:
 
 {defect_list}
 
@@ -100,7 +103,7 @@ Rules:
 1. Select exactly one class.
 2. Return only the class name.
 3. Do not provide an explanation.
-4. Do not return any class other than the four listed above.
+4. Do not return any class other than the five listed above.
 """
 
     messages = [
@@ -186,13 +189,15 @@ Rules:
 def validate_result(result):
 
     # 정확히 class 이름이 나온 경우
-    if result in DEFECT_CLASSES:
+    if result in CLASSES:
         return result
 
-    # 문장 형태로 출력된 경우 class 이름 추출
+    # 문장 형태로 출력된 경우 class 이름 추출 (불량 타입 먼저, 마지막에 normal)
     for defect in DEFECT_CLASSES:
         if defect in result:
             return defect
+    if "normal" in result:
+        return "normal"
 
     return "unknown"
 
