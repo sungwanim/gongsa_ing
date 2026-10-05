@@ -179,20 +179,40 @@ class QwenBrain:
 
 
 # ---------------------------------------------------------------- 루프
-def run_agent(r, brain, tools, t, max_steps=5):
+def run_agent(r, brain, tools, t, max_steps=5, auto_map=False, auto_whole=False, skip_confident=False):
+    """한 사진에 대해 생각 -> 행동 -> 관찰 루프를 돈다.
+    보조 옵션(컨트롤러가 대신 해 주는 것, 기록에 auto=True 로 표시):
+      auto_map       : 시작할 때 read_map 을 자동 실행 (에이전트는 첫 관찰을 받은 상태에서 시작)
+      skip_confident : 확실한 불량 구간은 에이전트가 고민하지 않고 종류 확인(ask_whole)만 자동 실행 후 확정
+      auto_whole     : 에이전트가 ask_whole 없이 decide 하려 하면 컨트롤러가 먼저 ask_whole 을 실행 (확인 누락 보완)"""
     ev, log, trace, used = {}, [], [], set()
-    for _ in range(max_steps):
-        options = tools.available(ev, used)
-        thought, action = brain.step(r, log, ev, options)
-        if action not in options:
-            action = "decide"
-        if action == "decide":
-            trace.append({"thought": thought, "action": "decide", "observation": "확정"})
-            break
+
+    def auto(action, thought):
         obs = tools.run(action, r, ev)
         used.add(action)
         log.append((action, obs))
-        trace.append({"thought": thought, "action": action, "observation": obs})
+        trace.append({"thought": thought, "action": action, "observation": obs, "auto": True})
+
+    if auto_map or (skip_confident and r["zone10"] == "confident"):
+        auto("read_map", "(자동) 시작할 때 이상 맵 요약을 읽는다")
+    if skip_confident and r["zone10"] == "confident":
+        auto("ask_whole", "(자동) 확실한 불량 구간이라 고민 없이 종류만 확인한다")
+        trace.append({"thought": "(자동) 확실한 불량이라 추가 확인 없이 확정", "action": "decide", "observation": "확정", "auto": True})
+    else:
+        for _ in range(max_steps):
+            options = tools.available(ev, used)
+            thought, action = brain.step(r, log, ev, options)
+            if action not in options:
+                action = "decide"
+            if action == "decide":
+                if auto_whole and "ask_whole" not in used:
+                    auto("ask_whole", "(자동 보완) 전체 사진 판정이 빠져 있어 먼저 실행한다")
+                trace.append({"thought": thought, "action": "decide", "observation": "확정"})
+                break
+            obs = tools.run(action, r, ev)
+            used.add(action)
+            log.append((action, obs))
+            trace.append({"thought": thought, "action": action, "observation": obs})
     dec, why = final_decision(r["zone10"], ev, t)
     return {"key": q.key(r), "zone": r["zone10"], "true": r["type"], "label": r["label"], "pred_defect": dec,
             "type": defect_type(ev) if dec else "good", "why": why, "evidence": {k: v for k, v in ev.items() if k != "probs_whole"},
@@ -221,8 +241,16 @@ def main():
     p.add_argument("--eval", action="store_true")
     p.add_argument("--limit", type=int, default=40, help="에이전트를 돌릴 보고용 사진 수 (정해진 무작위 순서)")
     p.add_argument("--mock", action="store_true", help="GPU 없이 규칙 기반 두뇌로 흐름만 확인")
+    p.add_argument("--assist", action="store_true", help="보조 옵션 전부 켜기: --auto-map --auto-whole --skip-confident")
+    p.add_argument("--auto-map", action="store_true", help="시작할 때 read_map 자동 실행")
+    p.add_argument("--auto-whole", action="store_true", help="에이전트가 ask_whole 없이 decide 하면 컨트롤러가 대신 실행")
+    p.add_argument("--skip-confident", action="store_true", help="확실한 불량 구간은 고민 없이 종류 확인만 하고 확정")
+    p.add_argument("--resume", action="store_true", help="이미 처리한 사진은 건너뛰고 이어서 (기록 파일에 덧붙임)")
+    p.add_argument("--trace-name", default="agent_trace", help="results/ 아래 판단 기록 파일 이름(확장자 제외)")
     p.add_argument("--no-zoom", action="store_true", help="zoom_check 도구를 쓰지 않음 (GPU 없이도 실제 저장 결과로 에이전트 흐름 확인 가능)")
     a = p.parse_args()
+    if a.assist:
+        a.auto_map = a.auto_whole = a.skip_confident = True
 
     import hashlib
     import region_crop as rc
@@ -261,16 +289,28 @@ def main():
     order = sorted(report, key=lambda r: hashlib.md5(("agent" + q.key(r)).encode()).hexdigest())[:a.limit]
     results = []
     os.makedirs(a.out, exist_ok=True)
-    fp = os.path.join(a.out, "agent_trace{}.jsonl".format("_mock" if a.mock else ""))
-    with open(fp, "w") as f:
+    fp = os.path.join(a.out, "{}{}.jsonl".format(a.trace_name, "_mock" if a.mock else ""))
+    done = {}
+    if a.resume and os.path.exists(fp):
+        for l in open(fp):
+            if l.strip():
+                x = json.loads(l)
+                done[x["key"]] = x
+        print("이어서 하기: 이미 처리한 사진 {}장".format(len(done)))
+    with open(fp, "a" if a.resume else "w") as f:
         for i, r in enumerate(order, 1):
-            res = run_agent(r, brain, tools, t)
+            k = q.key(r)
+            if k in done:
+                results.append(done[k])
+                continue
+            res = run_agent(r, brain, tools, t, auto_map=a.auto_map, auto_whole=a.auto_whole, skip_confident=a.skip_confident)
             res["baseline_defect"] = baseline_pred(r, p1, t)
             results.append(res)
             f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush()
             print("[{}/{}] {} 구간 {} -> {} ({}) | 도구 {}".format(
                 i, len(order), os.path.basename(r["path"]), r["zone10"], "불량" if res["pred_defect"] else "정상", res["why"],
-                " > ".join(s["action"] for s in res["trace"])), flush=True)
+                " > ".join(s["action"] + ("*" if s.get("auto") else "") for s in res["trace"])), flush=True)
     y = np.array([x["label"] for x in results])
     ag = np.array([x["pred_defect"] for x in results])
     bs = np.array([x["baseline_defect"] for x in results])
