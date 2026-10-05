@@ -43,6 +43,9 @@ $E test > "$T/test.out" 2>&1; rc=$?
 chk "test 성공(종료 코드 0)" "[ $rc -eq 0 ]"
 chk "test: 통합·안전 테스트 PASS 기록, 판정 칸에 FAIL 없음" "awk -F'\\t' '\$1==\"test_summary\" && \$4==\"PASS\"' $E2E_HOME/logs/results.tsv | grep -q . && ! awk -F'\\t' '\$4==\"FAIL\"' $E2E_HOME/logs/results.tsv | grep -q ."
 chk "report.md 생성" "grep -q '통합·안전 테스트' $E2E_HOME/logs/report.md"
+chk "결과표에 검사별 요약(test_runs)이 기록됨" "awk -F'\\t' '\$1==\"test_runs\" && \$3 ~ /read_map/' $E2E_HOME/logs/results.tsv | grep -q ."
+$E params > "$T/params.out" 2>&1
+chk "params: 산출물이 있으면 기존 산출물 사용으로 PASS 기록(이전 실패 기록 덮어씀)" "awk -F'\\t' '\$1==\"params\" && \$4==\"PASS\"' $E2E_HOME/logs/results.tsv | grep -q ."
 $E down > "$T/down.out" 2>&1
 sleep 1
 chk "down: 에이전트 포트가 닫힘(프로세스가 실제로 종료됨)" "! lsof -nP -iTCP:$AGENT_PORT -sTCP:LISTEN -t >/dev/null 2>&1"

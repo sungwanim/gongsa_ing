@@ -254,7 +254,15 @@ def build_app(settings):
         print("MMR 서비스:", mmr.health(), flush=True)
     except Exception as e:
         raise SystemExit("MMR 서비스에 연결할 수 없습니다 ({}): {}".format(settings.mmr_url, e))
-    return App(settings, mmr, load_qwen(settings, params))
+    app = App(settings, mmr, load_qwen(settings, params))
+    if app.gallery:                       # 시작할 때 한 번 돌려 둔다 (콜드 스타트 제거). 실패해도 서비스는 계속 시작한다
+        try:
+            t0 = time.time()
+            app.agent.warmup(app.gallery_path(app.gallery[0]["id"]))
+            print("예열 완료 (참고 이미지 캐시 준비, {:.1f}초)".format(time.time() - t0), flush=True)
+        except Exception as e:
+            print("[경고] 예열 실패(서비스는 계속 시작합니다): {}: {}".format(type(e).__name__, str(e)[:200]), flush=True)
+    return app
 
 
 def main():

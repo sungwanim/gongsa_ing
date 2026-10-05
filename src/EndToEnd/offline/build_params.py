@@ -92,6 +92,10 @@ def main():
     print("저장된 Qwen v8_n12 결과가 보정용 {}장 중 {}장에 있음".format(len(calib), have))
     if have < len(calib):
         print("[경고] 보정용 이미지 일부에 Qwen 결과가 없습니다. t 가 기존 최종값과 다를 수 있습니다.")
+    missing = [r for r in calib if q.key(r) not in p1]
+    # clear_normal 구간 이미지는 Qwen 확률을 보지 않고 정상으로 처리하므로(v10_label) 누락이 t 계산에 영향을 주지 않는다
+    miss_by_zone = {z: sum(1 for r in missing if r["zone10"] == z) for z in ("clear_normal", "amb", "confident")}
+    print("Qwen 결과가 없는 보정용 이미지 {}장의 구간: {}".format(len(missing), miss_by_zone))
     t = q.choose_t_by_recall(calib, p1, None, a.normal_recall)
     print("구간 기준 tau_lo={:.4f} tau_hi={:.4f} (rscore) | 임계값 t={}".format(lo, hi, t))
 
@@ -162,7 +166,8 @@ def main():
         json.dump({"items": gallery, "refs": [{"file": os.path.relpath(r["path"], a.data_root).replace(os.sep, "/"),
                                               "label": r["label"], "condition": r["condition"]} for r in refs]}, f, ensure_ascii=False, indent=2)
     summary = {"n_rows": len(rows), "n_calib": len(calib), "n_report": len(report), "qwen_calib_have": have,
-               "qwen_calib_total": len(calib), "tau_lo": lo, "tau_hi": hi, "t": t, "n_refs": len(refs_sha),
+               "qwen_calib_total": len(calib), "qwen_missing_by_zone": miss_by_zone,
+               "qwen_missing_effective": miss_by_zone["amb"] + miss_by_zone["confident"], "tau_lo": lo, "tau_hi": hi, "t": t, "n_refs": len(refs_sha),
                "n_gallery": len(gallery_sha), "n_calib_hashes": len(calib_sha), "n_excluded": len(excluded),
                "manifests": [os.path.basename(m) for m in manifests], "refs_manifest": os.path.basename(a.refs_manifest),
                "overlap": 0, "created_at": params["created_at"], "code_commit": commit}

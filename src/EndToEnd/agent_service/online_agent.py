@@ -13,6 +13,10 @@ class OnlineAgent:
     def __init__(self, params, brain, whole_fn, second_fn=None):
         self.params, self.brain, self.whole_fn, self.second_fn = params, brain, whole_fn, second_fn
 
+    def warmup(self, image_path):
+        """첫 검사가 느려지지 않도록 시작할 때 참고 이미지 캐시를 미리 만든다 (ask_whole 한 번 실행)."""
+        return self.whole_fn(image_path)
+
     def inspect(self, image_path, mmr, emit, max_steps=5):
         """mmr: {"score", "map"} (MMR 서비스 응답). 최종 결과 dict 를 돌려주고, 진행은 emit(이벤트, dict) 로 보낸다."""
         p = self.params

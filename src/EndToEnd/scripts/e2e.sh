@@ -232,6 +232,7 @@ cmd_params() {
   need_conda || return 1
   if [ -f "$ART/params.json" ] && [ "${1:-}" != "--force" ]; then
     info "이미 있음: $ART/params.json (다시 만들려면: e2e.sh params --force)"
+    res params "기준값 생성" "기존 산출물 사용 ($ART)" PASS
   else
     mkdir -p "$ART"
     local extra=()
@@ -257,8 +258,12 @@ cmd_params() {
   res params_counts "보정 / 보고 / 참고 / 갤러리 장수" "$(json_get "$sj" n_calib) / $(json_get "$sj" n_report) / $(json_get "$sj" n_refs) / $(json_get "$sj" n_gallery)  (참고 목록: $(json_get "$sj" refs_manifest))" INFO
   local have total
   have="$(json_get "$sj" qwen_calib_have)"; total="$(json_get "$sj" qwen_calib_total)"
+  local eff mz; eff="$(json_get "$sj" qwen_missing_effective)"; mz="$(json_get "$sj" qwen_missing_by_zone)"
   if [ "$have" = "$total" ]; then res params_qwen "Qwen 저장 결과가 보정용 이미지를 덮는 비율" "$have / $total" PASS
-  else res params_qwen "Qwen 저장 결과가 보정용 이미지를 덮는 비율" "$have / $total  (t 가 기존 최종값과 다를 수 있음)" WARN; fi
+  elif [ "$eff" = "0" ]; then res params_qwen "Qwen 저장 결과가 보정용 이미지를 덮는 비율" "$have / $total (누락 $((total - have))장은 모두 정상 확정 구간이라 임계값 t 계산에 영향 없음: $mz)" PASS
+  elif [ -z "$eff" ]; then res params_qwen "Qwen 저장 결과가 보정용 이미지를 덮는 비율" "$have / $total (누락의 구간 분포를 모름: e2e.sh params --force 로 다시 만들면 판정됨)" WARN
+  else res params_qwen "Qwen 저장 결과가 보정용 이미지를 덮는 비율" "$have / $total (누락 중 ${eff}장이 애매·불량 구간이라 t 가 기존 최종값과 다를 수 있음: $mz)" WARN; fi
+  res params "기준값 생성" "완료 ($ART)" PASS      # 이전 실행의 실패 기록을 덮어쓴다
 }
 
 # ------------------------------------------------------------------ verify-mmr
@@ -384,6 +389,16 @@ cmd_test() {
   if [ "$f" = "0" ]; then res test_summary "통합·안전 테스트" "PASS $p / WARN $w / FAIL $f" "$([ "$w" = "0" ] && echo PASS || echo WARN)"
   else res test_summary "통합·안전 테스트" "PASS $p / WARN $w / FAIL $f" FAIL; show_tail_on_fail "$LOGS/agent.log" 15; fi
   local first rest mx
+  python3 - "$j" "$RESULTS" <<'PY'
+import json, sys
+runs = json.load(open(sys.argv[1])).get("runs", [])
+txt = "; ".join("#{} {} {} -> {}{} ({:.1f}초)".format(i, r.get("zone"), ">".join(r.get("tools") or []), r.get("decision"),
+                "/" + r["defect_type"] if r.get("defect_type") else "", r.get("total_s") or 0) for i, r in enumerate(runs))
+if txt:
+    lines = [l for l in open(sys.argv[2]) if not l.startswith("test_runs\t")]
+    lines.append("test_runs\t검사별 결과 (구간, 도구 순서 -> 판정/종류, 시간)\t{}\tINFO\n".format(txt))
+    open(sys.argv[2], "w").writelines(lines)
+PY
   first="$(json_get "$j" first_total_s)"; rest="$(json_get "$j" rest_median_s)"; mx="$(json_get "$j" max_total_s)"
   if [ -n "$first" ]; then res test_time "이미지당 소요 시간 (첫 이미지 / 이후 중앙값 / 최대)" "${first}초 / ${rest:--}초 / ${mx}초  (기준 ${LATENCY_WARN}초)" INFO; fi
   local g; g="$(gpu_mib)"
@@ -458,6 +473,7 @@ PY
 # ------------------------------------------------------------------ all
 cmd_all() {
   local steps=(init check params verify_mmr up test) s rc=0
+  [ -f "$RESULTS" ] && mv "$RESULTS" "$RESULTS.prev"      # 이전 실행의 기록이 결과표에 섞이지 않게
   for s in "${steps[@]}"; do
     FAILS=0
     "cmd_$s"; rc=$?
