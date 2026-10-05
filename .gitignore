@@ -1,1 +1,8 @@
-AeBAD/
+# macOS / 압축 해제 찌꺼기 (AeBAD 이미지 폴더 안에도 생길 수 있음)
+.DS_Store
+._*
+__MACOSX/
+
+# 학습 결과물: 용량이 커서 GitHub 파일 한도(100MB)를 넘거나 저장소를 무겁게 함 (체크포인트 .pth, 이상 맵 .npz)
+*.pth
+*.npz
