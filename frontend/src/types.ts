@@ -36,6 +36,8 @@ export interface Inspection {
   map_b64: string
   map_shape: [number, number]
   image_size: [number, number] | null
+  /** 서버가 검사한 이미지의 미리보기(JPEG)를 보관하고 있는지. 이전 기록은 false (히트맵만 표시) */
+  has_image: boolean
 }
 
 export interface GalleryItem {
@@ -45,7 +47,7 @@ export interface GalleryItem {
 
 /** POST /api/inspect* 가 스트림으로 보내는 이벤트 */
 export type ServerEvent =
-  | { event: 'start'; data: { source: string; size: [number, number]; warning: string | null } }
+  | { event: 'start'; data: { source: string; size: [number, number]; warning: string | null; preview_b64?: string } }
   | { event: 'mmr'; data: { score: number; rscore: number; zone: Zone; map_b64: string; map_shape: [number, number]; sec: number } }
   | { event: 'thought'; data: { text: string; options: string[] } }
   | { event: 'action'; data: { tool: string; choice_probs: Record<string, number> | null } }

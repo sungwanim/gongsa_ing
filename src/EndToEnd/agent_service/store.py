@@ -19,8 +19,13 @@ CREATE TABLE IF NOT EXISTS inspections (
   decision TEXT, defect_type TEXT, why TEXT,
   tools TEXT, trace TEXT, type_probs TEXT, timings TEXT,
   map_b64 TEXT, map_shape TEXT, image_size TEXT,
-  is_test INTEGER NOT NULL DEFAULT 0
+  is_test INTEGER NOT NULL DEFAULT 0,
+  image_jpg BLOB
 )"""
+
+# 목록에는 이미지 본문(BLOB)을 싣지 않는다 (대시보드를 불러올 때마다 수 MB 를 읽지 않도록)
+COLS = ("id, created_at, source, sha256, sep_flag, mmr_score, rscore, zone, decision, defect_type, why, tools, trace, type_probs, "
+        "timings, map_b64, map_shape, image_size, is_test, (image_jpg IS NOT NULL) AS has_image")
 
 
 def downsample_map(amap, factor=2):
@@ -41,6 +46,8 @@ class Store:
             cols = [r["name"] for r in c.execute("PRAGMA table_info(inspections)")]
             if "is_test" not in cols:
                 c.execute("ALTER TABLE inspections ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
+            if "image_jpg" not in cols:
+                c.execute("ALTER TABLE inspections ADD COLUMN image_jpg BLOB")       # 이전 기록은 이미지 없음(NULL) -> 화면은 히트맵만 표시
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -51,16 +58,17 @@ class Store:
         with self._lock, self._conn() as c:
             cur = c.execute(
                 "INSERT INTO inspections (created_at, source, sha256, sep_flag, mmr_score, rscore, zone, decision, defect_type, why,"
-                " tools, trace, type_probs, timings, map_b64, map_shape, image_size, is_test) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " tools, trace, type_probs, timings, map_b64, map_shape, image_size, is_test, image_jpg) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), rec["source"], rec["sha256"], rec.get("sep_flag"), rec["mmr_score"], rec["rscore"],
                  rec["zone"], rec["decision"], rec.get("defect_type"), rec["why"], json.dumps(rec["tools"]),
                  json.dumps(rec["trace"], ensure_ascii=False), json.dumps(rec.get("type_probs")), json.dumps(rec["timings"]),
-                 rec["map_b64"], json.dumps(rec["map_shape"]), json.dumps(rec.get("image_size")), 1 if rec.get("is_test") else 0))
+                 rec["map_b64"], json.dumps(rec["map_shape"]), json.dumps(rec.get("image_size")), 1 if rec.get("is_test") else 0, rec.get("image_jpg")))
             return cur.lastrowid
 
     @staticmethod
     def _row(r):
         d = dict(r)
+        d["has_image"] = bool(d.get("has_image"))
         for k in ("tools", "trace", "type_probs", "timings", "map_shape", "image_size"):
             d[k] = json.loads(d[k]) if d.get(k) else None
         d.pop("sha256", None)
@@ -68,7 +76,7 @@ class Store:
 
     def list(self, limit=200, include_test=False):
         """대시보드 목록(최신순). 점검용 테스트 검사(is_test=1)는 기본으로 제외한다."""
-        q = "SELECT * FROM inspections {} ORDER BY id DESC LIMIT ?".format("" if include_test else "WHERE is_test = 0")
+        q = "SELECT {} FROM inspections {} ORDER BY id DESC LIMIT ?".format(COLS, "" if include_test else "WHERE is_test = 0")
         with self._conn() as c:
             return [self._row(r) for r in c.execute(q, (limit,))]
 
@@ -99,5 +107,11 @@ class Store:
 
     def get(self, rid):
         with self._conn() as c:
-            r = c.execute("SELECT * FROM inspections WHERE id=?", (rid,)).fetchone()
+            r = c.execute("SELECT {} FROM inspections WHERE id=?".format(COLS), (rid,)).fetchone()
             return self._row(r) if r else None
+
+    def get_image(self, rid):
+        """저장된 미리보기 JPEG 바이트 (없으면 None)."""
+        with self._conn() as c:
+            r = c.execute("SELECT image_jpg FROM inspections WHERE id=?", (rid,)).fetchone()
+            return bytes(r["image_jpg"]) if r and r["image_jpg"] is not None else None

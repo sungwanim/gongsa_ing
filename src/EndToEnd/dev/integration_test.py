@@ -133,6 +133,12 @@ def main():
     dash = json.loads(txt)["items"]
     check("대시보드에 결과 저장", len(dash) >= len(runs), "{}건".format(len(dash)))
     check("대시보드 응답에 경로·파일명·해시가 없음", "AeBAD" not in txt and "sha256" not in txt and ".png" not in txt)
+    withimg = [i for i in dash if i.get("has_image")]
+    if withimg:
+        st, im = get(base + "/api/dashboard/{}/image".format(withimg[0]["id"]), tok)
+        check("검사한 이미지의 미리보기(JPEG)가 제공됨(히트맵 겹침용)", st == 200 and im[:2] == b"\xff\xd8", "{}바이트".format(len(im)))
+    else:
+        check("검사한 이미지의 미리보기가 저장됨", False, "has_image 인 기록이 없음")
     st, body = get(base + "/api/dashboard", tok)
     shown = [i for i in json.loads(body)["items"] if i.get("is_test")]
     check("점검용 검사는 기본 대시보드 목록에 보이지 않음", not shown, "{}건 노출".format(len(shown)))

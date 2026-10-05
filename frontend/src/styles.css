@@ -107,8 +107,18 @@ main { max-width: 1120px; margin: 0 auto; padding: 0 20px 40px; }
 /* heatmap */
 .hm { width: 100%; }
 .heat { position: relative; aspect-ratio: 1; border-radius: 16px; overflow: hidden; background: #0b1f4b; touch-action: none; }
+.heat.with-img { background: #111; }
+.hm-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; user-select: none; }
+.hm-layer { position: absolute; }
+.hm-frame { position: absolute; border: 1.5px dashed rgba(255, 255, 255, .75); box-shadow: 0 0 0 1px rgba(0, 0, 0, .35); pointer-events: none; }
+.hm-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; margin-bottom: 12px; }
+.seg { display: inline-flex; padding: 3px; border-radius: 12px; background: var(--surface-2); }
+.seg button { border: 0; background: none; padding: 6px 14px; border-radius: 9px; font-size: 13px; font-weight: 700; color: var(--text-2); transition: background .15s, color .15s; }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+.slider { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.slider input { width: 120px; accent-color: var(--blue); }
 .hm.large .heat { cursor: crosshair; border-radius: 20px; }
-.heat canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.heat canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: auto; }
 .heat-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px); background-size: 12.5% 12.5%; pointer-events: none; }
 .heat-peak { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 6px; pointer-events: none; }
 .heat-peak i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.3); }

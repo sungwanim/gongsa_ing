@@ -199,6 +199,42 @@ def main():
     items = migrated.list()
     check("이전 DB 마이그레이션: 기존 기록 보존(is_test=0)", len(items) == 1 and items[0]["is_test"] == 0 and items[0]["why"] == "old")
 
+    # ---- 검사 이미지 미리보기(히트맵 겹침용) ----
+    import base64
+    tmp5 = tempfile.mkdtemp()
+    app5, srv5, base5 = start(Settings(dict(env, AGENT_DATA_DIR=os.path.join(tmp5, "db"))))
+    big = io.BytesIO()
+    mock_artifacts.synth_image(31, (1600, 900)).save(big, "PNG")
+    events, _ = None, None
+    req = urllib.request.Request(base5 + "/api/inspect", data=big.getvalue(), method="POST")
+    body = urllib.request.urlopen(req, timeout=60).read().decode()
+    evs = [(b.split("\n")[0][7:], json.loads(b.split("\n")[1][6:])) for b in body.strip().split("\n\n")]
+    st_ev = dict(evs)["start"]
+    prev = base64.b64decode(st_ev["preview_b64"])
+    pim = Image.open(io.BytesIO(prev))
+    check("start 이벤트에 미리보기 JPEG(긴 변 640px, 원본 비율 유지)", pim.format == "JPEG" and max(pim.size) == 640 and abs(pim.size[0] / pim.size[1] - 1600 / 900) < 0.02, str(pim.size))
+    items5 = json.loads(get(base5 + "/api/dashboard")[1])["items"]
+    check("대시보드 항목에 has_image=true 이고 이미지 본문(BLOB)은 JSON 에 없음", items5[0]["has_image"] is True and "image_jpg" not in items5[0])
+    st, img = get(base5 + "/api/dashboard/{}/image".format(items5[0]["id"]))
+    check("GET /api/dashboard/<id>/image 가 같은 JPEG 를 돌려줌", st == 200 and img == prev)
+    check("이미지에 EXIF/파일명이 들어 있지 않음", not Image.open(io.BytesIO(img)).getexif())
+    try:
+        get(base5 + "/api/dashboard/999999/image")
+        check("없는 이미지는 404", False)
+    except urllib.error.HTTPError as e:
+        check("없는 이미지는 404", e.code == 404)
+    srv5.shutdown()
+    app6, srv6, base6 = start(Settings(dict(env, AGENT_DATA_DIR=os.path.join(tmp5, "db"), AGENT_TOKEN="tok")))
+    try:
+        get(base6 + "/api/dashboard/{}/image".format(items5[0]["id"]))
+        check("이미지 엔드포인트도 토큰 필요(401)", False)
+    except urllib.error.HTTPError as e:
+        check("이미지 엔드포인트도 토큰 필요(401)", e.code == 401)
+    st, _ = get(base6 + "/api/dashboard/{}/image?token=tok".format(items5[0]["id"]))
+    check("?token= 으로 <img> 가 이미지를 받을 수 있음", st == 200)
+    srv6.shutdown()
+    check("이전 DB(이미지 열 없음)는 has_image=false 로 보존", migrated.list()[0]["has_image"] is False and migrated.get_image(1) is None)
+
     # agent.py 오프라인 평가 방식(저장된 결과 조회 함수 주입)이 그대로 동작하는지
     import agent as A
     import numpy as np

@@ -35,7 +35,7 @@ export default function RunView({ run }: { run: RunState }) {
             <p className="eyebrow">1차 · MMR</p>
             {run.mmr ? (
               <div className="mmr-row">
-                <HeatmapCanvas mapB64={run.mmr.map_b64} shape={run.mmr.map_shape} large />
+                <HeatmapCanvas mapB64={run.mmr.map_b64} shape={run.mmr.map_shape} large imageSrc={run.preview} imageSize={run.size} />
                 <div className="mmr-facts">
                   <span className="big-number">{run.mmr.score.toFixed(2)}</span>
                   <span className="gauge-unit">MMR 이상 점수</span>

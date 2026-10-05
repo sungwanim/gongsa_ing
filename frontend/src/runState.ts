@@ -13,6 +13,9 @@ export interface Step {
 export interface RunState {
   startedAt: number
   warning?: string | null
+  /** 서버가 보낸 미리보기(data URL)와 원본 크기: 히트맵을 겹쳐 그리는 데 쓴다 */
+  preview?: string
+  size?: [number, number]
   mmr?: { score: number; rscore: number; zone: Zone; map_b64: string; map_shape: [number, number]; sec: number }
   steps: Step[]
   final?: { id: number; decision: Decision; defect_type: string | null; why: string; zone: Zone; tools: string[]; type_probs: Record<string, number> | null; timings: Timings }
@@ -28,7 +31,7 @@ export function reduceRun(s: RunState, e: ServerEvent): RunState {
   const last = () => steps[steps.length - 1]
   switch (e.event) {
     case 'start':
-      return { ...s, warning: e.data.warning }
+      return { ...s, warning: e.data.warning, preview: e.data.preview_b64 ? `data:image/jpeg;base64,${e.data.preview_b64}` : undefined, size: e.data.size }
     case 'mmr':
       return { ...s, mmr: e.data }
     case 'thought':

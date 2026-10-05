@@ -4,11 +4,13 @@
   GET  /api/gallery                      갤러리 목록(id 만, 경로·정답 없음)
   GET  /api/gallery/<id>/thumb | image   갤러리 이미지
   GET  /api/dashboard[?include_test=1]   저장된 결과(최신순). 점검용 테스트 검사(X-E2E-Test: 1 헤더로 표시)는 기본 제외
+  GET  /api/dashboard/<id>/image         검사한 이미지의 미리보기 JPEG (긴 변 640px, 히트맵을 겹쳐 그리는 용도)
   POST /api/inspect                      본문 = 이미지 바이트 -> SSE 스트림
   POST /api/inspect/gallery/<id>         갤러리 이미지로 같은 루프 -> SSE 스트림
 SSE 이벤트: start, mmr, tool_start, thought, action, observation, final, done, error
 한 번에 한 이미지만 처리한다(처리 중이면 409). 접근 토큰(AGENT_TOKEN)은 Authorization: Bearer 또는 ?token= 으로 받는다.
 """
+import base64
 import hashlib
 import hmac
 import io
@@ -36,6 +38,16 @@ from params import Params    # noqa: E402
 from store import Store, downsample_map  # noqa: E402
 
 GALLERY_ID = re.compile(r"^[0-9a-f]{12}$")
+PREVIEW_SIDE = 640
+
+
+def make_preview(data, max_side=PREVIEW_SIDE):
+    """원본을 긴 변 max_side 의 JPEG 미리보기로 만든다. EXIF 는 적용하지 않고 버려서(MMR 이 본 픽셀 방향과 같게) 화면에 겹쳐 그릴 때 어긋나지 않게 한다."""
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((max_side, max_side), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
 ALLOWED_FORMATS = {"JPEG": ".jpg", "PNG": ".png", "BMP": ".bmp", "WEBP": ".webp"}
 
 
@@ -148,6 +160,10 @@ def make_handler(app):
             if path == "/api/dashboard":
                 inc = (parse_qs(urlparse(self.path).query).get("include_test") or ["0"])[0] == "1"
                 return self._json(200, {"items": app.store.list(include_test=inc)})
+            m = re.match(r"^/api/dashboard/(\d+)/image$", path)
+            if m:
+                img = app.store.get_image(int(m.group(1)))
+                return self._bytes(200, img, "image/jpeg") if img else self._json(404, {"error": "not found"})
             m = re.match(r"^/api/dashboard/(\d+)$", path)
             if m:
                 rec = app.store.get(int(m.group(1)))
@@ -207,7 +223,8 @@ def make_handler(app):
             try:
                 sha = hashlib.sha256(data).hexdigest()
                 flag = sep.classify_upload(sha, app.sep_sets) if source == "upload" else None
-                emit("start", {"source": source, "size": list(Image.open(io.BytesIO(data)).size),
+                preview = make_preview(data)
+                emit("start", {"source": source, "size": list(Image.open(io.BytesIO(data)).size), "preview_b64": base64.b64encode(preview).decode(),
                                "warning": ("이 이미지는 {} 이미지와 같은 파일입니다. 데모에 쓰지 않는 것이 좋아요.".format(
                                    {"refs": "퓨샷 참고", "calib": "파라미터 계산", "gallery": "갤러리"}[flag])) if flag else None})
                 tmp = os.path.join(tempfile.gettempdir(), "e2e_{}{}".format(uuid.uuid4().hex, ALLOWED_FORMATS[fmt]))
@@ -229,7 +246,7 @@ def make_handler(app):
                 rec = {"source": source, "sha256": sha, "sep_flag": flag, "mmr_score": res["mmr_score"], "rscore": res["rscore"],
                        "zone": res["zone"], "decision": res["decision"], "defect_type": res["defect_type"], "why": res["why"],
                        "tools": res["tools"], "trace": res["trace"], "type_probs": res["type_probs"], "timings": timings,
-                       "map_b64": b64, "map_shape": shp, "image_size": mmr["orig_size"], "is_test": is_test}
+                       "map_b64": b64, "map_shape": shp, "image_size": mmr["orig_size"], "is_test": is_test, "image_jpg": preview}
                 rid = app.store.add(rec)
                 emit("final", {"id": rid, "decision": res["decision"], "defect_type": res["defect_type"], "why": res["why"],
                                "zone": res["zone"], "tools": res["tools"], "type_probs": res["type_probs"], "timings": timings})

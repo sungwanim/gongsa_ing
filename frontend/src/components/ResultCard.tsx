@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { inspectionImageUrl } from '../api'
 import { CLASSES, DEFECT_ORDER, TOOLS, ZONES, typeLabel } from '../config'
 import type { Inspection, Verdict } from '../types'
 import HeatmapCanvas from './HeatmapCanvas'
@@ -14,7 +15,12 @@ export default function ResultCard({ item, fresh }: Props) {
   const color = defect && item.defect_type && item.defect_type in CLASSES ? CLASSES[item.defect_type as Verdict].color : undefined
   return (
     <article className={'rc card' + (defect ? ' defect' : ' normal') + (fresh ? ' fresh' : '')}>
-      <HeatmapCanvas mapB64={item.map_b64} shape={item.map_shape} />
+      <HeatmapCanvas
+        mapB64={item.map_b64}
+        shape={item.map_shape}
+        imageSrc={item.has_image ? inspectionImageUrl(item.id) : undefined}
+        imageSize={item.image_size}
+      />
       <div className="rc-body">
         <div className="rc-top">
           <span className={'pill ' + (defect ? 'defect' : 'normal')}>

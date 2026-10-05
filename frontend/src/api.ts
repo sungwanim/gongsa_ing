@@ -44,6 +44,9 @@ async function json<T>(path: string): Promise<T> {
   return r.json()
 }
 
+/** 검사한 이미지의 미리보기(JPEG). <img src> 용이라 토큰을 쿼리로 붙인다 */
+export const inspectionImageUrl = (id: number): string => assetUrl(`/api/dashboard/${id}/image`)
+
 export const getGallery = async (): Promise<GalleryItem[]> => (await json<{ items: GalleryItem[] }>('/api/gallery')).items
 export const getDashboard = async (): Promise<Inspection[]> => (await json<{ items: Inspection[] }>('/api/dashboard')).items
 export const getHealth = () => json<{ status: string; ready: boolean; busy: boolean }>('/api/health')
