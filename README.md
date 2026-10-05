@@ -1,9 +1,12 @@
 # 팀명_공사중
 
+항공엔진 블레이드 이상 탐지 엔드투엔드 데모: 이미지 선택/업로드 → MMR(1차) → Qwen2-VL 에이전트(2차) → 대시보드.
 
-## Dataset Setup (`AeBAD`)
+- 실행·점검: `src/EndToEnd/INTEGRATION_GUIDE.md`, `src/EndToEnd/scripts/e2e.sh`
+- 프론트엔드: `frontend/` (React + Vite)
+- 1차 모델: `src/ModelA/MMR_Test`, 에이전트: `src/ModelB/velm/agent.py`
 
-> **Note**: `AeBAD` 디렉토리 및 내부 이미지 파일은 버전 관리 대상에서 제외(`.gitignore`)되어 있으므로 Git 레포지토리에 포함되지 않습니다.
+## 데이터셋 (`AeBAD/AeBAD_S`)
 
-- **위치 제한**: `AeBAD` 폴더와 이미지 파일들은 반드시 **프로젝트 루트 경로**(`/`)에 위치해야 합니다.
-- **접근 방식**: 작업 스크립트 실행 시 데이터셋 폴더를 직접 이동하지 않고, 상대 경로(예: `../AeBAD`)를 통해 상위 디렉토리에서 접근해야 합니다.
+AeBAD_S가 저장소에 포함되어 있다 (출처·라이선스: `AeBAD/README.md`, `AeBAD/LICENSE-DATASET`, 무결성: `AeBAD/AeBAD_S.sha256`).
+데이터셋 폴더는 프로젝트 루트(`/AeBAD`)에 있어야 한다.
