@@ -7,6 +7,8 @@ from sklearn.metrics import roc_auc_score
 import torch
 import logging
 import numpy as np
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,41 +39,46 @@ class MMR_pipeline_:
     def fit(self, individual_dataloader):
         temporal_lr = self.cfg.TRAIN_SETUPS.learning_rate
 
-        for epoch in range(self.cfg.TRAIN_SETUPS.epochs):
-            self.cur_model.eval()
-            self.mmr_model.train()
-            current_lr = mmr_adjust_learning_rate(self.optimizer, epoch, self.cfg)
-            if (epoch + 1) % 50 == 0:
-                LOGGER.info("current lr is %.5f" % current_lr)
+        epoch_bar = tqdm(range(self.cfg.TRAIN_SETUPS.epochs), desc="train", unit="epoch", dynamic_ncols=True)
+        # logging_redirect_tqdm keeps LOGGER lines from breaking the progress bar
+        with logging_redirect_tqdm():
+            for epoch in epoch_bar:
+                self.cur_model.eval()
+                self.mmr_model.train()
+                current_lr = mmr_adjust_learning_rate(self.optimizer, epoch, self.cfg)
+                if (epoch + 1) % 50 == 0:
+                    LOGGER.info("current lr is %.5f" % current_lr)
 
-            loss_list = []
+                loss_list = []
 
-            for image in individual_dataloader:
-                if isinstance(image, dict):
-                    image = image["image"].to(self.device)
-                else:
-                    image = image.to(self.device)
+                for image in individual_dataloader:
+                    if isinstance(image, dict):
+                        image = image["image"].to(self.device)
+                    else:
+                        image = image.to(self.device)
 
-                self.teacher_outputs_dict.clear()
-                with torch.no_grad():
-                    _ = self.cur_model(image)
-                multi_scale_features = [self.teacher_outputs_dict[key]
-                                        for key in self.cfg.TRAIN.MMR.layers_to_extract_from]
-                reverse_features = self.mmr_model(image,
-                                                  mask_ratio=self.cfg.TRAIN.MMR.finetune_mask_ratio)  # bn(inputs))
-                multi_scale_reverse_features = [reverse_features[key]
-                                                for key in self.cfg.TRAIN.MMR.layers_to_extract_from]
+                    self.teacher_outputs_dict.clear()
+                    with torch.no_grad():
+                        _ = self.cur_model(image)
+                    multi_scale_features = [self.teacher_outputs_dict[key]
+                                            for key in self.cfg.TRAIN.MMR.layers_to_extract_from]
+                    reverse_features = self.mmr_model(image,
+                                                      mask_ratio=self.cfg.TRAIN.MMR.finetune_mask_ratio)  # bn(inputs))
+                    multi_scale_reverse_features = [reverse_features[key]
+                                                    for key in self.cfg.TRAIN.MMR.layers_to_extract_from]
 
-                loss = each_patch_loss_function(multi_scale_features, multi_scale_reverse_features)
+                    loss = each_patch_loss_function(multi_scale_features, multi_scale_reverse_features)
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                loss_list.append(loss.item())
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    loss_list.append(loss.item())
 
-            LOGGER.info('epoch [{}/{}], loss:{:.4f}'.format(epoch + 1,
-                                                            self.cfg.TRAIN_SETUPS.epochs,
-                                                            np.mean(loss_list)))
+                LOGGER.info('epoch [{}/{}], loss:{:.4f}'.format(epoch + 1,
+                                                                self.cfg.TRAIN_SETUPS.epochs,
+                                                                np.mean(loss_list)))
+                epoch_bar.set_postfix(loss="{:.4f}".format(np.mean(loss_list)))
+        epoch_bar.close()
 
         # reset learning rate
         self.cfg.TRAIN_SETUPS.learning_rate = temporal_lr
@@ -175,7 +182,9 @@ class MMR_pipeline_:
                 # per-image results for threshold-based classification metrics
                 "image_scores": np.array(labels_prediction, dtype=np.float64),
                 "image_labels": np.array(labels_gt, dtype=int),
-                "image_paths": ima_path}
+                "image_paths": ima_path,
+                # raw (un-normalized) per-image anomaly maps, after gaussian smoothing; (N, imagesize, imagesize)
+                "anomaly_maps": masks_prediction.astype(np.float32)}
 
     def save_model(self, path):
         # only the MMR model is trained; the WideResNet teacher stays at ImageNet weights

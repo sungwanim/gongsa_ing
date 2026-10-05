@@ -85,7 +85,7 @@ pip install -r src/ModelA/MMR_Test/requirements.txt
 
 ```bash
 cd ~/gongsa_ing
-git fetch && git checkout mmr-test && git pull
+git checkout main && git pull
 conda activate mmr
 ```
 
@@ -100,16 +100,22 @@ bash src/ModelA/MMR_Test/AeBAD_S_run.sh TRAIN_SETUPS.epochs 1 TRAIN_SETUPS.warmu
 
 ### 5-2. 학습 + 평가 (약 1시간)
 
+tmux 세션 안에서 실행한다. SSH 연결이 끊겨도 세션이 살아 있어 학습이 계속된다.
+
 ```bash
-nohup bash src/ModelA/MMR_Test/AeBAD_S_run.sh TRAIN_SETUPS.num_workers 6 \
-  > src/ModelA/MMR_Test/train_AeBAD_S.out 2>&1 &
-tail -f src/ModelA/MMR_Test/train_AeBAD_S.out      # Ctrl+C 해도 학습은 계속됨
+tmux new -s mmr                                    # 세션 생성 (이미 있으면: tmux attach -t mmr)
+conda activate mmr
+bash src/ModelA/MMR_Test/AeBAD_S_run.sh TRAIN_SETUPS.num_workers 6
+# 세션에서 빠져나오기: Ctrl+B 누른 뒤 d  (학습은 계속됨)
 ```
 
-- `nohup`이라 SSH 연결이 끊겨도 계속 실행된다. 다시 접속해서 `tail -n 40 ...out`으로 확인한다.
+- 학습 중에는 `tqdm` 진행 막대가 epoch 진행률, 경과/남은 시간(ETA), 최근 loss를 보여준다. (`train: 45%|... 90/200 [22:30<27:30, loss=0.1234]`)
+- 다시 접속해서 `tmux attach -t mmr`로 진행 상황을 본다. 세션 목록은 `tmux ls`.
+- 로그는 터미널과 `log_MMR_AeBAD_S_54/*.log`에 함께 남는다. 스크롤은 `Ctrl+B` 다음 `[` (나갈 때 `q`).
 - 실행 중인지 확인: `ps aux | grep "[m]ain.py"`
 - 소요 시간: 학습 epoch당 약 15초 × 200 ≈ 50분, 평가 4개 도메인 약 5분
 - 서버 CPU 권장 worker 수가 6이라 `num_workers 6`을 넘긴다(기본 8은 경고 발생).
+- 끝났는데 `main.py: Main function complete!` 이후에도 프로세스가 안 끝나면(DataLoader worker 정리 지연) 결과는 이미 저장된 상태이므로 `Ctrl+C`로 종료해도 된다. 안 되면 다른 창에서 `pkill -f main.py`.
 
 ### 5-3. 저장된 가중치로 평가만 (학습 없이)
 
@@ -134,14 +140,25 @@ bash src/ModelA/MMR_Test/AeBAD_S_test.sh \
 
 ## 6. 결과물
 
-`MMR_Test/log_MMR_AeBAD_S_54/` (git 제외)
+`MMR_Test/log_MMR_AeBAD_S_54/`
 
-| 파일 | 내용 |
-|---|---|
-| `*.log` | 전체 로그 (도메인별 지표, 평균) |
-| `checkpoints/MMR_aebad_S_AeBAD_S.pth` | 학습된 MMR 가중치 (약 390MB). WideResNet50은 고정 ImageNet 가중치라 저장하지 않음 |
-| `image_scores_aebad_S_AeBAD_S_<도메인>.csv` | 이미지별 `image_path, label(1=불량), score, prediction` — 기준값을 바꿔 다시 분석할 때 사용 |
-| `image_save/` | 도메인별 무작위 40장의 이상 맵 시각화 |
+| 파일 | 내용 | git |
+|---|---|---|
+| `*.log` | 전체 로그 (도메인별 지표, 평균) | 포함 |
+| `image_scores_aebad_S_AeBAD_S_<도메인>.csv` | 이미지별 `image_path, label(1=불량), score, prediction` — 기준값을 바꿔 다시 분석할 때 사용 | 포함 |
+| `anomaly_maps_aebad_S_AeBAD_S_<도메인>.npz` | 이미지별 **원본 anomaly score**(`scores`)와 **원본 anomaly map**(`anomaly_maps`, N×224×224 float32, Gaussian σ=4 적용 후 정규화 전), `image_paths`, `labels`. 행 순서는 위 csv와 같음 | 제외 (용량) |
+| `checkpoints/MMR_aebad_S_AeBAD_S.pth` | 학습된 MMR 가중치 (약 390MB). WideResNet50은 고정 ImageNet 가중치라 저장하지 않음 | 제외 |
+| `image_save/`, `video_save/` | 도메인별 무작위 40장의 이상 맵 시각화 (정규화·양자화된 이미지) | 제외 |
+
+git에서는 가중치(`*.pth`, `*.pt`, `*.ckpt`, `*.safetensors`), `*.npz`, `image_save/`, `video_save/`만 제외하고 나머지 결과(로그, csv)는 커밋한다 (`MMR_Test/.gitignore`).
+
+`.npz`는 NumPy 배열 묶음 압축 파일이다.
+
+```python
+import numpy as np
+d = np.load("anomaly_maps_aebad_S_AeBAD_S_same.npz")
+d["anomaly_maps"][i], d["scores"][i], d["image_paths"][i]   # i번째 이미지
+```
 
 같은 `OUTPUT_DIR`로 다시 실행하면 `image_save/`와 가중치가 덮어써지므로, 실험마다 `OUTPUT_DIR`를 바꾼다.
 
@@ -198,6 +215,8 @@ bash src/ModelA/MMR_Test/AeBAD_S_test.sh \
 | `main.py`, `utils/parser_.py` | `--device` 미지정 시 `CUDA_VISIBLE_DEVICES` 유지 | MIG 환경 대응 |
 | `method_config/AeBAD_S/MMR.yaml` | 데이터/MAE 경로, `save_model: True` | 팀 경로 규칙, 가중치 저장 |
 | `AeBAD_S_run.sh` | 스크립트 폴더로 `cd`, 추가 옵션 전달 | 어디서 실행해도 상대경로 유지 |
+| `models/MMR/MMR_pipeline.py`, `requirements.txt` | 학습 루프에 `tqdm` 진행 막대(ETA·loss) 추가 | 학습 남은 시간 확인 |
+| `models/MMR/MMR_pipeline.py`, `tools/train.py` | 평가 결과에 원본 anomaly map 포함, 이미지별 score·map을 `.npz`로 저장 | 히트맵 생성 전 원본 값 확보 |
 | `models/MMR/MMR_pipeline.py` | `save_model`/`load_model` 구현, `evaluation()`이 이미지별 점수 반환 | 원본은 가중치를 저장하지 않음 |
 | `tools/train.py`, `main.py` | 평가 전용 `test()` 추가, 이미지 분류 지표·점수 CSV 저장 | 1차 검사용 판정 지표 필요 |
 | `utils/common.py` | `best_f1_threshold`, `compute_image_classification_metrics` 추가 | 〃 |
