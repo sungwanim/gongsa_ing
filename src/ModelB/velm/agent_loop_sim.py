@@ -60,6 +60,39 @@ def fmt(m):
         m["Recall"], m["FN"], m["FP"], m["FPR"], m["Accuracy"], m["Precision"], m["F1"])
 
 
+def predict_rescue(rows, p1, p2, t0, tr):
+    """v8 이 정상으로 인정(pn1>=t0)한 애매 구간 사진 중, 두 번째 의견의 normal 확률이 tr 미만이면 불량으로 되돌린다. (불량 쪽으로만 바꾼다)"""
+    out, rescued = [], 0
+    for r in rows:
+        z = r["zone10"]
+        if z == "clear_normal":
+            out.append(0); continue
+        if z == "confident":
+            out.append(1); continue
+        a = p1.get(q.key(r))
+        if a is None or a.get("normal", 0.0) < t0:
+            out.append(1); continue
+        b = p2.get(q.key(r))
+        if b is not None and b.get("normal", 0.0) < tr:
+            out.append(1); rescued += 1
+        else:
+            out.append(0)
+    return np.array(out), rescued
+
+
+def rescue_table(rows, calib, report, p1, p2, a):
+    t0 = q.choose_t_by_recall(calib, p1, None, 0.97)
+    print("\n[구제 루프] v8 기준 t={} 로 정상 인정 후, 두 번째 의견({})의 normal 확률이 tr 미만이면 불량으로 되돌림".format(t0, a.second))
+    print("{:>6} | {:^52} | {:^52}".format("tr", "보정용 절반", "보고용 절반"))
+    for tr in (0.0, 0.01, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5):
+        cm = summarize(calib, predict_rescue(calib, p1, p2, t0, tr)[0])
+        pr, n = predict_rescue(report, p1, p2, t0, tr)
+        rm = summarize(report, pr)
+        print("{:>6} | Recall {:.3f} FN {:>3} FP {:>3} FPR {:.3f} F1 {:.3f} | Recall {:.3f} FN {:>3} FP {:>3} FPR {:.3f} F1 {:.3f} (되돌림 {}장)".format(
+            tr, cm["Recall"], cm["FN"], cm["FP"], cm["FPR"], cm["F1"], rm["Recall"], rm["FN"], rm["FP"], rm["FPR"], rm["F1"], n))
+    print("읽는 법: tr=0.0 이 구제 없음(기준선)입니다. tr을 올릴수록 FN이 줄고 FP가 늘어납니다. FN이 크게 줄면서 FP가 조금만 느는 구간이 있으면 구제 루프가 효과가 있는 것입니다.")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mmr-out", default=os.path.join(q.MMR_DIR, "log_MMR_AeBAD_S_54"))
@@ -71,6 +104,7 @@ def main():
     p.add_argument("--recall-target", type=float, default=0.98, help="구간 나누기(MMR/라우터 쪽)의 재현율 목표")
     p.add_argument("--target", type=float, default=0.978, help="시스템 전체 재현율 목표 (보정용 절반에서 이 이상이어야 후보)")
     p.add_argument("--fpr-hi", type=float, default=0.02)
+    p.add_argument("--rescue", action="store_true", help="구제 루프 표: v8이 정상으로 인정한 사진을 두 번째 의견이 확실히 불량이라고 하면 불량으로 되돌림")
     a = p.parse_args()
     rows = q.apply_holdout(q.load_mmr_csv(a.mmr_out), a.holdout)
     calib = [r for r in rows if q.split_of(r) == "calib"]
@@ -91,6 +125,10 @@ def main():
         "라우터" if a.router else "MMR 점수", len(amb), a.second, cov, cov / max(len(amb), 1)))
     cov_r = sum(1 for r in report if r["zone10"] == "amb" and q.key(r) in p2)
     print("  (보고용 절반의 애매 구간 {}장 중 {}장)".format(sum(1 for r in report if r["zone10"] == "amb"), cov_r))
+
+    if a.rescue:
+        rescue_table(rows, calib, report, p1, p2, a)
+        return
 
     # 기준선: v8 한 번 + t 하나 (지금 최종 방식, normal 재현율 목표 0.97 과 같은 방식으로 t 결정)
     t0 = q.choose_t_by_recall(calib, p1, None, 0.97)
