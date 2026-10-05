@@ -16,7 +16,7 @@
 - 갤러리 API 는 파일 경로를 브라우저에 보내지 않는다 (경로에 폴더명=라벨이 들어 있음). 이미지는 id 로만 제공.
 
 ## 서버 통합 점검
-서버에서 전체 흐름을 처음 돌려 보는 순서는 [`INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md) 를 따른다 (환경 점검 → 기준값 생성 → MMR 검증 → 서비스 실행 → 통합 테스트 → 맥 화면 확인).
+서버 점검은 `bash scripts/e2e.sh all` 로 자동화되어 있다(환경 점검 → 기준값 생성 → MMR 검증 → 서비스 실행 → 통합·안전 테스트, 결과표 `~/end2end/logs/report.md`). 사용법과 실패 시 조치는 [`INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md).
 
 ## 단계
 1. 서버 점검(Docker/GPU, 참고 이미지 위치) 2. `offline/` 기준값 생성·분리 검증 3. `mmr` 서비스 4. `agent` 서비스 5. 프론트 연동 6. compose 와 서버 점검.

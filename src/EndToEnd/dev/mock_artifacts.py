@@ -30,8 +30,11 @@ def make(out, n_gallery=6):
     calib_rel = "gallery_imgs/_calib_like.png"           # 보정에 쓰인 것처럼 취급할 이미지 (갤러리에는 넣지 않음)
     synth_image(999).save(os.path.join(out, calib_rel))
     calib_sha = sep.sha256_file(os.path.join(out, calib_rel))
-    json.dump({"items": items, "refs": []}, open(os.path.join(out, "gallery.json"), "w"))
-    json.dump({"refs": ["r" * 64], "calib": [calib_sha, "c" * 64], "gallery": [g["sha256"] for g in items]},
+    ref_rel = "gallery_imgs/_ref.png"                    # 퓨샷 참고 이미지처럼 취급 (갤러리에는 넣지 않음)
+    synth_image(777).save(os.path.join(out, ref_rel))
+    ref_sha = sep.sha256_file(os.path.join(out, ref_rel))
+    json.dump({"items": items, "refs": [{"file": ref_rel, "label": "fracture", "condition": "same"}]}, open(os.path.join(out, "gallery.json"), "w"))
+    json.dump({"refs": [ref_sha], "calib": [calib_sha, "c" * 64], "gallery": [g["sha256"] for g in items]},
               open(os.path.join(out, "separation.json"), "w"))
     f = 13
     json.dump({"tau_lo": -0.5, "tau_hi": 1.2, "t": 0.98,

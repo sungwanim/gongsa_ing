@@ -159,6 +159,13 @@ def main():
     with open(os.path.join(a.out, "gallery.json"), "w") as f:
         json.dump({"items": gallery, "refs": [{"file": os.path.relpath(r["path"], a.data_root).replace(os.sep, "/"),
                                               "label": r["label"], "condition": r["condition"]} for r in refs]}, f, ensure_ascii=False, indent=2)
+    summary = {"n_rows": len(rows), "n_calib": len(calib), "n_report": len(report), "qwen_calib_have": have,
+               "qwen_calib_total": len(calib), "tau_lo": lo, "tau_hi": hi, "t": t, "n_refs": len(refs_sha),
+               "n_gallery": len(gallery_sha), "n_calib_hashes": len(calib_sha), "n_excluded": len(excluded),
+               "manifests": [os.path.basename(m) for m in manifests], "refs_manifest": os.path.basename(a.refs_manifest),
+               "overlap": 0, "created_at": params["created_at"], "code_commit": commit}
+    with open(os.path.join(a.out, "summary.json"), "w") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
     print("저장:", a.out, "->", sorted(os.listdir(a.out)))
 
 
