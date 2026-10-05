@@ -48,18 +48,18 @@ def final_decision(zone, ev, t):
         if pn is None:
             return 0, "정상 확정 구간이고 더 확인하지 않음 (기준선과 같음)"
         if pn < t:
-            return 1, "정상 확정 구간이지만 Qwen 정상 확률 {:.2f} < t={}".format(pn, t)
-        return 0, "Qwen도 정상 (확률 {:.2f})".format(pn)
+            return 1, "정상 확정 구간이지만 Qwen 정상 확률 {:.3f} < t={}".format(pn, t)
+        return 0, "Qwen도 정상 (확률 {:.3f})".format(pn)
     # amb
     if pn is None:
         return 1, "전체 사진 판정을 하지 않아 정상으로 인정할 수 없음 (불량 우선)"
     if pn < t:
-        return 1, "Qwen 정상 확률 {:.2f} < t={}".format(pn, t)
+        return 1, "Qwen 정상 확률 {:.3f} < t={}".format(pn, t)
     if ev.get("zoom_defect") is not None and ev["zoom_defect"] >= 0.5:
-        return 1, "확대해 보니 손상 확률 {:.2f}".format(ev["zoom_defect"])
+        return 1, "확대해 보니 손상 확률 {:.3f}".format(ev["zoom_defect"])
     if ev.get("pn_v7") is not None and ev["pn_v7"] < 0.5:
-        return 1, "두 번째 프롬프트가 불량 쪽 (정상 확률 {:.2f})".format(ev["pn_v7"])
-    return 0, "Qwen 정상 확률 {:.2f} >= t 이고 추가 확인에서도 반대 근거 없음".format(pn)
+        return 1, "두 번째 프롬프트가 불량 쪽 (정상 확률 {:.3f})".format(ev["pn_v7"])
+    return 0, "Qwen 정상 확률 {:.3f} >= t 이고 추가 확인에서도 반대 근거 없음".format(pn)
 
 
 def defect_type(ev):
@@ -115,13 +115,13 @@ class ToolBox:
                 return "결과 없음 (이 사진은 전체 판정이 저장돼 있지 않음)"
             ev["pn_whole"], ev["probs_whole"] = pr.get("normal", 0.0), pr
             top = max(pr, key=pr.get)
-            return "Qwen(참고 12장 비교): 정상 {:.2f}, 최상위 {} ({:.2f})".format(pr.get("normal", 0.0), top, pr[top])
+            return "ask_whole 결과 (Qwen이 참고 불량 사진 12장과 비교한 판정, 이상 탐지기 아님): 정상 확률 {:.3f}, 가장 높은 항목 {} ({:.3f})".format(pr.get("normal", 0.0), top, pr[top])
         if name == "second_prompt":
             pr = self.p2.get(k) if self.p2 is not None else None
             if pr is None:
                 return "결과 없음 (이 사진은 두 번째 프롬프트 결과가 저장돼 있지 않음)"
             ev["pn_v7"] = pr.get("normal", 0.0)
-            return "두 번째 프롬프트: 정상 확률 {:.2f}".format(ev["pn_v7"])
+            return "두 번째 프롬프트 결과: 정상 확률 {:.3f}".format(ev["pn_v7"])
         if name == "zoom_check":
             d = self.zoom_fn(r)
             ev["zoom_defect"] = d
@@ -146,8 +146,8 @@ class MockBrain:
 
 TOOL_HELP = {
     "read_map": "Read a summary of the anomaly detector output for this photo (scores, zone, anomaly shape).",
-    "ask_whole": "Compare the whole photo with 12 labeled defect reference photos and get P(normal) and the likely defect type. "
-                 "A blade can only be judged NORMAL if this check was done.",
+    "ask_whole": "A Qwen vision-language model compares the whole photo with 12 labeled defect reference photos and returns P(normal) and the likely defect type "
+                 "(this is NOT the anomaly detector). A blade can only be judged NORMAL if this check was done.",
     "second_prompt": "Ask the same photo again with a different prompt for a second opinion. Optional; it can only raise suspicion, never clear a blade.",
     "decide": "Finish and give the final verdict. Use it when you have enough evidence; extra checks cost time.",
 }
