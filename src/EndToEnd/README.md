@@ -32,7 +32,7 @@ python offline/separation.py --artifacts <새 폴더>
 - [x] 2단계 `offline/` 기준값 생성·분리 검증 (서버 실행 필요, 미실행)
 - [x] 3단계 `mmr_service/` MMR 단일 이미지 추론 서비스(표준 라이브러리 HTTP, 요청 때 로드·해제)
 - [x] 4단계 `agent_service/` 에이전트 서비스 (표준 라이브러리 HTTP + SSE + SQLite). 기존 `agent.py` 무수정, 온라인 어댑터로 실행
-- [ ] 5단계 프론트 연동 (`frontend/`)
+- [x] 5단계 프론트 연동 (`frontend/`): 업로드/갤러리 → SSE 진행 화면 → 대시보드 추가 → 자동 복귀. 실제 브라우저(Chrome 자동 조작) 17개 시나리오 통과(가짜 서버 기준)
 - [ ] 6단계 서버 통합 점검
 
 모의 모드 테스트(GPU 불필요): `python dev/test_local.py`

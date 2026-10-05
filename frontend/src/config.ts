@@ -1,10 +1,6 @@
-import type { DefectType, Verdict } from './types'
+import type { DefectType, Verdict, Zone } from './types'
 
-/** 실험에서 고정한 값(frozen_config.json). 백엔드 연결 시 서버 응답으로 대체하세요. */
-export const MMR = { threshold: 0.431763, sigma: 0.109, k: 1.0 }
-export const BAND = { lo: MMR.threshold - MMR.k * MMR.sigma, hi: MMR.threshold + MMR.k * MMR.sigma }
-export const INNER = { lo: MMR.threshold - 0.5 * MMR.sigma, hi: MMR.threshold + 0.5 * MMR.sigma }
-export const VLM_RULE = { threshold: 0.3, holdDelta: 0.05 }
+/** 히트맵 색 눈금(MMR 이상 점수 범위). 서버 응답의 점수와 같은 단위 */
 export const SCORE_AXIS = { min: 0.2, max: 0.8 }
 
 export interface ClassInfo {
@@ -24,3 +20,20 @@ export const CLASSES: Record<Verdict, ClassInfo> = {
 
 export const DEFECT_ORDER: DefectType[] = ['ablation', 'breakdown', 'fracture', 'groove']
 export const VERDICT_ORDER: Verdict[] = ['normal', ...DEFECT_ORDER]
+
+export const ZONES: Record<Zone, { label: string; hint: string }> = {
+  clear_normal: { label: '정상 확정 구간', hint: 'MMR이 확실히 정상으로 본 구간이에요' },
+  amb: { label: '애매 구간', hint: '점수가 애매해서 에이전트가 더 확인해요' },
+  confident: { label: '확실한 불량 구간', hint: 'MMR이 확실히 불량으로 본 구간이에요' },
+}
+
+export const TOOLS: Record<string, string> = {
+  read_map: '이상 맵 읽기',
+  ask_whole: 'Qwen 전체 판정',
+  second_prompt: '두 번째 프롬프트',
+  zoom_check: '확대 확인',
+  decide: '판정 확정',
+}
+
+export const typeLabel = (t: string | null): string =>
+  t && t in CLASSES ? CLASSES[t as Verdict].label : t === 'unknown' ? '종류 미확인' : t ?? ''

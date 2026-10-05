@@ -1,49 +1,40 @@
 # Blade Inspector (frontend)
 
-항공기 블레이드 이상 탐지 Agent의 웹 화면입니다. 1차 MMR, 2차 Qwen VLM 판정과 이상 히트맵을 보여 주는 **디자인 데모**이며, 지금은 서버 없이 mock 데이터로 동작합니다.
+항공기 블레이드 검사 웹 화면. 이미지 1장을 올리면 서버(`src/EndToEnd/agent_service`)가 MMR → 에이전트(Qwen) 루프로 판정하고,
+진행 과정이 실시간으로 화면에 나타난 뒤 결과가 **대시보드에 추가되고 이미지 선택 화면으로 자동 복귀**한다.
 
-- React 18 + Vite 5 + TypeScript (외부 UI 라이브러리 없음)
-- 폰트: Pretendard (CDN), 라이트/다크 모드, 모바일 반응형
+- React 18 + Vite 5 + TypeScript (외부 UI 라이브러리 없음), Pretendard, 라이트/다크, 반응형
 
 ## 실행
 
 ```bash
 cd frontend
+cp .env.example .env      # VITE_API_TARGET 에 에이전트 서비스 주소
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # 타입 검사 + 프로덕션 빌드
+npm run dev               # http://localhost:5173  (/api 는 VITE_API_TARGET 으로 프록시)
+npm run build             # 타입 검사 + 프로덕션 빌드
 ```
 
-## 화면 구성
+- **진짜 서버**: 서버에서 `scripts/run_mmr.sh`, `scripts/run_agent.sh` 를 실행하고, `VITE_API_TARGET` 에 그 주소를 넣는다.
+  외부에서 접속할 때는 포트 포워딩 대신 **Tailscale 같은 VPN 주소**를 쓰고, 서버에 `AGENT_TOKEN` 을 설정한다.
+  화면이 401 을 받으면 접근 토큰 입력 창을 띄우고, 토큰은 이 탭(sessionStorage)에만 저장한다.
+- **GPU 없이 화면만 개발할 때**: `python src/EndToEnd/dev/run_mock_server.py` (가짜 서버, **판정은 무작위**라 성능·데모 자료로 쓰지 말 것)
 
-| 구역 | 내용 |
-|---|---|
-| 히어로 | 서비스 소개, 샘플 보기 |
-| 검사 결과 | 최종 판정 카드, **이상 히트맵 뷰어**(마우스를 올리면 위치별 점수, 최고점·Qwen 확인 영역 표시), 1차 MMR 점수 게이지, 2차 Qwen 확률, 최종 판정 |
-| 검사 기록 | 샘플별 점수·단계·판정 표 |
-| 불량 가이드 | 삭마·파손·파단·홈 설명 (샘플 관찰 기반 초안) |
+## 화면 흐름
+1. **검사하기**: 이미지 끌어다 놓기/선택, 또는 샘플 갤러리 썸네일 선택 (갤러리는 id 만 받고 파일 경로·정답은 받지 않음)
+2. **진행 화면**(SSE): MMR 점수·히트맵·구간 → 에이전트의 생각 / 도구 선택(확률) / 관찰 → 최종 판정과 불량 종류 확률
+3. 완료되면 토스트와 함께 **대시보드 맨 위에 카드 추가**, 선택 화면으로 자동 복귀 (처리 중에는 새 검사 불가)
+4. **대시보드**: 서버 SQLite 에 저장된 카드(히트맵, 판정, 구간, 사용한 도구, 소요 시간, 에이전트 기록 펼치기). 새로고침해도 유지
 
-## 판정 규칙 (`src/config.ts`, `src/lib/decide.ts`)
-
-실험에서 고정한 값을 그대로 옮겼습니다. 백엔드 연결 시 서버 응답으로 대체하세요.
-
-- 바깥 구간 [0.323, 0.541): 이 밖은 MMR 판정 확정
-- 안쪽 [0.377, 0.486): Qwen이 재판정. 불량 확률 t=0.30, ±0.05 이면 "검사원 확인 필요"
-- MMR이 불량으로 본 이미지는 Qwen이 종류(ablation / breakdown / fracture / groove)만 분류
-
-## 백엔드 연결 방법
-
-1. `src/types.ts`의 `Sample`이 서버 응답 형태입니다 (`mmrScore`, `vlm`, `typeProbs`, `box`).
-2. `src/mock/samples.ts`를 API 호출로 바꾸고, `HeatmapViewer`의 `makeMap(...)`(mock 히트맵)을 서버가 주는 이상 맵(예: 224×224 float 배열)으로 바꾸면 됩니다. 좌표(`box`)는 0~1 비율입니다.
-3. 화면의 수치는 모두 예시이며 실제 검사 결과나 성능을 뜻하지 않습니다.
-
-## 폴더
-
+## 구조
 ```
 src/
-  components/   NavBar, Hero, SamplePicker, HeatmapViewer, ScoreGauge,
-                PipelineSteps, VerdictCard, HistoryTable, DefectGlossary
-  lib/          colormap, mockMap, decide, useCountUp
-  mock/         samples (데모 데이터)
-  config.ts     임계값·클래스 정보  types.ts  타입  styles.css  디자인 토큰
+  api.ts          fetch + SSE(POST 스트림 파싱) 클라이언트, 토큰
+  types.ts        서버 응답/이벤트 타입 (서버와 같은 형태)
+  runState.ts     서버 이벤트 -> 진행 화면 상태 (순수 reducer)
+  config.ts       클래스/구간/도구 이름(한글), 히트맵 색 눈금
+  lib/            colormap, f16(서버가 보내는 float16 히트맵 해석), useCountUp
+  components/     Picker, RunView, HeatmapCanvas, Dashboard, ResultCard, TokenGate, NavBar, Hero, DefectGlossary
 ```
+
+참고: 에이전트에는 "보류" 상태가 없고 최종 판정은 정상/불량(불량이면 종류)이다. 불량 종류 설명은 샘플 관찰 기반 초안이다.

@@ -14,8 +14,8 @@ export default function NavBar({ theme, onToggleTheme }: Props) {
           <span>Blade Inspector</span>
         </a>
         <nav className="nav-links" aria-label="주요 메뉴">
-          <a href="#inspect">검사 결과</a>
-          <a href="#history">검사 기록</a>
+          <a href="#inspect">검사하기</a>
+          <a href="#dashboard">대시보드</a>
           <a href="#guide">불량 가이드</a>
         </nav>
         <button
