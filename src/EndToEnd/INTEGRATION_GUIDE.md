@@ -84,6 +84,7 @@ cat ~/end2end/logs/report.md                        # 결과표 (이 내용을 �
 | `MMR 체크포인트 없음`, `데이터셋 없음` | `e2e.conf`에서 `MMR_CKPT`/`DATA_ROOT` 수정 |
 | `MMR 점수 csv/npz 0개` | `MMR_OUT` 경로 확인 (`build_params`가 읽는 팀원의 읽기 전용 결과) |
 | `Qwen 저장 결과 없음` | `VELM_RESULTS` 경로 확인 (`qwen_results_v8_n12.jsonl`, `qwen_results_v7.jsonl`) |
+| `기준값 생성 실패` + 로그에 `KeyError`/`AssertionError` | 결과표의 "로그 끝부분"이 원인이다. 그대로 전달 |
 | `기준값 생성 실패` + `분리 위반` | 참고/보정/갤러리 이미지가 겹침. **조용히 넘어가지 않는 것이 정상 동작.** `params.log`를 알려 준다 |
 | `라우터 재현이 기존 계산과 다름` | 기존 `attach_router_scores`와 결과가 다름. `params.log`를 알려 준다 |
 | `MMR 점수 … 불일치` | 온라인 전처리·계산이 기존과 다름. **다음 단계로 가지 말고** `verify_mmr.log`를 알려 준다 |
@@ -181,6 +182,7 @@ bash src/EndToEnd/scripts/e2e.sh down      # 서비스 종료 (결과 DB·기준
 ```bash
 bash src/EndToEnd/dev/test_e2e_script.sh         # e2e.sh 의 up / status / test / down 흐름을 가짜 서비스로 검증 (12개)
 python3 src/EndToEnd/dev/test_local.py           # 에이전트 서비스 통합 테스트 (23개)
+python3 src/EndToEnd/dev/test_build_params.py    # 기준값 생성(build_params)을 합성 데이터로 끝까지 실행 (16개, 분리 위반 중단 포함)
 ```
 
 ## 부록: 수동으로 하나씩 실행할 때 (디버깅용)

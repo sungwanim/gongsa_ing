@@ -43,6 +43,7 @@ def main():
     ap.add_argument("--data-root", default=os.path.join(q.REPO_ROOT, "AeBAD"), help="AeBAD 폴더 (그 아래 AeBAD_S/...)")
     ap.add_argument("--holdout", default=q.HOLDOUT, help="agent.py 가 평가에서 제외하는 목록(기본 holdout_manifest.csv)")
     ap.add_argument("--refs-manifest", default=os.path.join(VELM, "holdout_manifest_12.csv"), help="ask_whole 이 쓰는 참고 이미지 목록")
+    ap.add_argument("--manifests-dir", default=VELM, help="holdout_manifest*.csv 가 있는 폴더(제외 목록 전체). 기본: velm 폴더")
     ap.add_argument("--recall-target", type=float, default=0.98)
     ap.add_argument("--fpr-hi", type=float, default=0.02)
     ap.add_argument("--normal-recall", type=float, default=0.97)
@@ -84,6 +85,7 @@ def main():
     assert diff < 1e-9, "라우터 재현이 기존 attach_router_scores 와 다릅니다 (차이 {})".format(diff)
 
     lo, hi = q.calibrate_v10([r for r in rows if r["split"] == "calib"], a.recall_target, a.fpr_hi, "rscore")
+    q.mark_zones_v10(rows, lo, hi, "rscore")      # agent.py 와 같은 순서: 구간 표시(zone10)를 붙여야 임계값 t 를 구할 수 있다
     q.TAG = "v8_n12"
     p1 = q.load_probs(a.results_dir)
     have = sum(1 for r in calib if q.key(r) in p1)
@@ -94,7 +96,7 @@ def main():
     print("구간 기준 tau_lo={:.4f} tau_hi={:.4f} (rscore) | 임계값 t={}".format(lo, hi, t))
 
     # ---- 2) 세 집합과 분리 검사 ------------------------------------------------------------------------------
-    manifests = sorted(glob.glob(os.path.join(VELM, "holdout_manifest*.csv")))
+    manifests = sorted(glob.glob(os.path.join(a.manifests_dir, "holdout_manifest*.csv")))
     excluded = set()
     for m in manifests:
         excluded |= keyset(m)

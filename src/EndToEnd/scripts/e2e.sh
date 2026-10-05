@@ -240,7 +240,8 @@ cmd_params() {
       --data-root "$DATA_ROOT" --out "$ART" "${extra[@]+"${extra[@]}"}" > "$LOGS/params.log" 2>&1
     local rc=$?
     if [ $rc -ne 0 ]; then
-      res params "기준값 생성" "실패 (종료 코드 $rc)" FAIL
+      local errline; errline="$(grep -v '^[[:space:]]*$' "$LOGS/params.log" | tail -3 | tr '\n' ' ' | cut -c1-300)"
+      res params "기준값 생성" "실패 (종료 코드 $rc). 로그 끝부분: $errline" FAIL
       if grep -q "분리 위반" "$LOGS/params.log"; then bad "참고/보정/갤러리 이미지가 겹침 — 조용히 넘어가지 않는 것이 정상 동작입니다. 로그를 알려 주세요"; fi
       if grep -q "라우터 재현" "$LOGS/params.log"; then bad "라우터 재현이 기존 계산과 다름 — 로그를 알려 주세요"; fi
       show_tail_on_fail "$LOGS/params.log" 20
@@ -274,7 +275,7 @@ cmd_verify_mmr() {
       --csv "$MMR_OUT/image_scores_aebad_S_AeBAD_S_$dom.csv" --data-root "$DATA_ROOT" -n "$n" --json-out "$j" >> "$LOGS/verify_mmr.log" 2>&1 || rc=1
   done
   if [ $rc -ne 0 ] || [ ! -f "$LOGS/verify_mmr_same.json" ]; then
-    res mmr_diff "MMR 점수 일치" "검증 실행 실패" FAIL; show_tail_on_fail "$LOGS/verify_mmr.log" 20; return 1
+    res mmr_diff "MMR 점수 일치" "검증 실행 실패. 로그 끝부분: $(grep -v '^[[:space:]]*$' "$LOGS/verify_mmr.log" | tail -3 | tr '\n' ' ' | cut -c1-300)" FAIL; show_tail_on_fail "$LOGS/verify_mmr.log" 20; return 1
   fi
   local d1 d2 passed
   d1="$(json_get "$LOGS/verify_mmr_same.json" max_diff)"; d2="$(json_get "$LOGS/verify_mmr_view.json" max_diff 2>/dev/null)"; d2="${d2:-0}"
@@ -308,7 +309,7 @@ start_mmr() {
   printf '[INFO] MMR 서비스 시작 대기'
   wait_ready "http://127.0.0.1:$MMR_PORT/health" 120 "$LOGS/mmr.pid" '"status": "ok"'; local rc=$?; echo
   if [ $rc -eq 0 ]; then res svc_mmr "MMR 서비스" "http://127.0.0.1:$MMR_PORT (요청마다 모델 로드·해제)" PASS; return 0; fi
-  res svc_mmr "MMR 서비스" "$([ $rc -eq 2 ] && echo '시작 직후 종료됨' || echo '시간 초과')" FAIL; show_tail_on_fail "$LOGS/mmr.log" 25; return 1
+  res svc_mmr "MMR 서비스" "$([ $rc -eq 2 ] && echo '시작 직후 종료됨' || echo '시간 초과'). 로그 끝부분: $(grep -v '^[[:space:]]*$' "$LOGS/mmr.log" | tail -3 | tr '\n' ' ' | cut -c1-300)" FAIL; show_tail_on_fail "$LOGS/mmr.log" 25; return 1
 }
 
 start_agent() {
@@ -327,7 +328,7 @@ start_agent() {
   printf '[INFO] 에이전트 서비스 시작 대기 (Qwen 로딩 1~3분)'
   wait_ready "$(agent_url)/api/health" 480 "$LOGS/agent.pid" '"ready": true'; local rc=$?; echo
   if [ $rc -eq 0 ]; then res svc_agent "에이전트 서비스" "$(agent_url) (인증: $([ -n "${AGENT_TOKEN:-}" ] && echo 토큰 || echo '없음, 로컬 전용'))" PASS; return 0; fi
-  res svc_agent "에이전트 서비스" "$([ $rc -eq 2 ] && echo '시작 직후 종료됨' || echo '시간 초과')" FAIL
+  res svc_agent "에이전트 서비스" "$([ $rc -eq 2 ] && echo '시작 직후 종료됨' || echo '시간 초과'). 로그 끝부분: $(grep -v '^[[:space:]]*$' "$LOGS/agent.log" | tail -3 | tr '\n' ' ' | cut -c1-300)" FAIL
   grep -E "MMR 서비스에 연결|참고 이미지를 찾을|변경되었습니다|분리 위반|OutOfMemory|out of memory|ImportError|iJIT|AGENT_TOKEN" "$LOGS/agent.log" | head -5 | cut -c1-200
   show_tail_on_fail "$LOGS/agent.log" 25; return 1
 }
