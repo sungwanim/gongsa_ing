@@ -80,6 +80,24 @@ def predict_rescue(rows, p1, p2, t0, tr):
     return np.array(out), rescued
 
 
+def fn_list(rows, p1, p2, a):
+    t0 = q.choose_t_by_recall([r for r in rows if q.split_of(r) == "calib"], p1, None, 0.97)
+    pr, _ = predict_rescue(rows, p1, p2, t0, 0.0)
+    miss = [r for r, v in zip(rows, pr) if r["label"] == 1 and v == 0]
+    print("\n[놓친 불량] v8 기준 t={} 에서 정상으로 판정된 불량 {}장 (보정용+보고용 전체)".format(t0, len(miss)))
+    print("{:>9} {:>7} | {:>10} {:>10} | {:>9} {:>9} | {}".format("타입", "구간", "v8 normal", a.second + " normal", "MMR점수", "라우터", "분할"))
+    nv = 0
+    for r in sorted(miss, key=lambda r: r["type"]):
+        k = q.key(r)
+        b = p2.get(k)
+        nv += int(b is None)
+        print("{:>9} {:>7} | {:>10.3f} {:>10} | {:>9.3f} {:>9} | {}".format(
+            r["type"], r["zone10"], p1[k].get("normal", 0.0) if k in p1 else float("nan"),
+            "없음" if b is None else "{:.3f}".format(b.get("normal", 0.0)), r["score"],
+            "-" if "rscore" not in r else "{:.2f}".format(r["rscore"]), q.split_of(r)))
+    print("두 번째 의견이 없는 사진 {}장 / {}장".format(nv, len(miss)))
+
+
 def rescue_table(rows, calib, report, p1, p2, a):
     t0 = q.choose_t_by_recall(calib, p1, None, 0.97)
     print("\n[구제 루프] v8 기준 t={} 로 정상 인정 후, 두 번째 의견({})의 normal 확률이 tr 미만이면 불량으로 되돌림".format(t0, a.second))
@@ -104,6 +122,7 @@ def main():
     p.add_argument("--recall-target", type=float, default=0.98, help="구간 나누기(MMR/라우터 쪽)의 재현율 목표")
     p.add_argument("--target", type=float, default=0.978, help="시스템 전체 재현율 목표 (보정용 절반에서 이 이상이어야 후보)")
     p.add_argument("--fpr-hi", type=float, default=0.02)
+    p.add_argument("--fn-list", action="store_true", help="v8 기준으로 정상이라고 놓친 불량 사진들의 점수와 두 번째 의견을 나열")
     p.add_argument("--rescue", action="store_true", help="구제 루프 표: v8이 정상으로 인정한 사진을 두 번째 의견이 확실히 불량이라고 하면 불량으로 되돌림")
     a = p.parse_args()
     rows = q.apply_holdout(q.load_mmr_csv(a.mmr_out), a.holdout)
@@ -126,6 +145,9 @@ def main():
     cov_r = sum(1 for r in report if r["zone10"] == "amb" and q.key(r) in p2)
     print("  (보고용 절반의 애매 구간 {}장 중 {}장)".format(sum(1 for r in report if r["zone10"] == "amb"), cov_r))
 
+    if a.fn_list:
+        fn_list(rows, p1, p2, a)
+        return
     if a.rescue:
         rescue_table(rows, calib, report, p1, p2, a)
         return
