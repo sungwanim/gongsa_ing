@@ -20,10 +20,11 @@ def main():
     art = os.environ.get("MOCK_ARTIFACTS") or os.path.join(tmp, "art")      # e2e.sh 회귀 테스트가 폴더를 지정한다
     mock_artifacts.make(art, n_gallery=8)
     s = Settings({"AGENT_ARTIFACTS": art, "AGENT_DATA_ROOT": art, "AGENT_DATA_DIR": os.environ.get("AGENT_DATA_DIR") or os.path.join(tmp, "db"),
-                  "AGENT_PORT": str(port)})
+                  "AGENT_PORT": str(port), "AGENT_HOST": os.environ.get("AGENT_HOST", "127.0.0.1"), "AGENT_TOKEN": os.environ.get("AGENT_TOKEN", ""),
+                  "AGENT_REQUIRE_TOKEN": os.environ.get("AGENT_REQUIRE_TOKEN", "0")})
     app = mock_backends.build_mock_app(s)
     print("[모의 서버 - 판정은 무작위] http://127.0.0.1:{}  (임시 폴더 {})".format(port, tmp), flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), server.make_handler(app)).serve_forever()
+    ThreadingHTTPServer((s.host, port), server.make_handler(app)).serve_forever()
 
 
 if __name__ == "__main__":

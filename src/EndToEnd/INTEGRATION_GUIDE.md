@@ -44,7 +44,9 @@ cat ~/end2end/logs/report.md                        # 결과표 (이 내용을 �
 | `e2e.sh up` | MMR 서비스 → 에이전트 서비스 순서로 시작, 준비될 때까지 대기 | 두 서비스 health 정상 |
 | `e2e.sh test` | 통합·안전 테스트 (갤러리 N장 검사, 이벤트 순서, 소요 시간, 참고 이미지 경고, 이미지가 아닌 파일 거절, 경로·해시 비노출, 대시보드 저장) | 모든 항목 통과 (소요 시간 초과는 WARN) |
 | `e2e.sh status` / `down` | 서비스·GPU 상태 / 서비스 종료 | - |
+| `e2e.sh ts-setup` / `ts-down` | (sudo 없이) Tailscale 을 사용자 영역 모드로 설치·실행 / 종료 | 로그인 후 `100.x` 주소 획득 |
 | `e2e.sh expose` / `unexpose` | Tailscale 주소 + 접근 토큰으로 외부 접속 설정 / 해제 | 토큰 없이 접근하면 401 |
+| `e2e.sh tunnel` | Tailscale 이 없을 때 SSH 로컬 터널 안내 (서버에 아무것도 새로 열지 않음) | - |
 | `e2e.sh report` | 결과표 출력(`~/end2end/logs/report.md`) | - |
 
 - 단계별로 따로 실행해도 되고(`bash src/EndToEnd/scripts/e2e.sh params` 등), 결과표는 실행할 때마다 갱신된다.
@@ -120,27 +122,59 @@ cat ~/end2end/logs/report.md                        # 결과표 (이 내용을 �
 
 ## 9. 외부(맥) 접속 확인 (Tailscale)
 
-포트 포워딩은 쓰지 않는다. **MMR 서비스는 계속 `127.0.0.1`에만 열려 있다.**
+포트 포워딩은 쓰지 않는다. **MMR 서비스는 계속 `127.0.0.1`에만 열려 있다.** 서버에 Tailscale이 없으면 아래 중 하나로 준비한다(서버에 Tailscale이 없는 것은 확인됨).
 
+| 방법 | 누가 | 설명 |
+|---|---|---|
+| **A. snap 정식 설치 (권장)** | sudo 가능한 사람(서버 관리자 또는 권한이 있는 계정) | 시스템 데몬(root)으로 설치되어 서버에 Tailscale 인터페이스가 생긴다. 에이전트를 Tailscale 주소에 직접 열 수 있다 |
+| B. 사용자 영역 모드 | sudo 없이 본인 | `e2e.sh ts-setup`이 `~/end2end/tailscale/`에 받아 실행한다. **내려받는 주소 접속, 사용자 영역 모드의 수신 동작은 제가 서버에서 검증하지 못했다.** 팀·서버 정책 확인 후 사용 |
+| C. SSH 로컬 터널 | 본인 | Tailscale 없이 임시 점검. 서버에 새로 열리는 것이 없다. SSH 계정이 있는 사람만 접속 가능 |
+
+### A. snap으로 설치 (sudo 필요)
+먼저 서버에서 상태를 본다(읽기 전용):
 ```bash
-bash src/EndToEnd/scripts/e2e.sh expose      # Tailscale 주소 + 무작위 접근 토큰으로 에이전트를 다시 시작하고 테스트
+command -v snap && snap version | head -2; snap list tailscale 2>&1 | head -2; sudo -n true 2>&1 | head -1
 ```
+sudo가 되는 사람이 실행한다:
+```bash
+sudo snap install tailscale
+sudo tailscale up                      # 출력되는 로그인 주소를 브라우저에서 열어 Tailscale 에 로그인
+tailscale ip -4                        # 100.x.x.x 주소가 나오면 성공
+sudo tailscale set --operator=$USER    # (선택) 일반 사용자가 sudo 없이 tailscale 명령을 쓰게 함. 공식 옵션이지만 이 서버에서는 미확인
+```
+관리자에게 보낼 요청문(그대로 전달 가능):
+> GPU 서버(team14)에 Tailscale 설치를 요청드립니다. `sudo snap install tailscale` 후 `sudo tailscale up`으로 저희 팀 Tailscale 계정에 로그인하고, `sudo tailscale set --operator=team14`를 한 번 실행해 주세요. 저희 앱은 접근 토큰이 있는 포트(8200) 하나만 Tailscale 주소에 엽니다.
 
-- `expose`는 `tailscale`이 없거나 주소를 못 얻으면 FAIL로 알려 준다. 서버에 Tailscale이 있는지는 제가 확인하지 못했고, 없으면 **관리자에게 설치/권한을 문의**해야 한다(이 경우 서버 안에서의 `test` 통과까지가 점검 기준이다).
+**공유 서버 주의**: 서버가 우리 Tailscale 네트워크(tailnet)에 들어가면 서버에서 `0.0.0.0`으로 열려 있는 **다른 사람의 서비스도 그 네트워크에서 접속 가능**해질 수 있다. 저희 에이전트는 토큰으로 보호하지만 다른 서비스는 아닐 수 있으니, 서버 관리자와 상의하고 필요하면 Tailscale ACL로 접근 범위를 제한한다.
+
+### B. 사용자 영역 모드 (sudo 없음)
+```bash
+bash src/EndToEnd/scripts/e2e.sh ts-setup     # 다운로드 → tailscaled(사용자 영역) 실행 → 로그인 주소 출력
+```
+출력된 `https://login.tailscale.com/...` 주소를 **아무 기기의 브라우저**에서 열어 로그인하면 연결된다. 자동 로그인을 원하면 Tailscale 관리 콘솔에서 만료되는 auth key를 만들어 `TS_AUTHKEY=<키> bash …/e2e.sh ts-setup`으로 실행한다(키는 채팅에 붙이지 않는다). 끄려면 `e2e.sh ts-down`.
+
+### 외부 접속 열기 (A, B 공통)
+```bash
+bash src/EndToEnd/scripts/e2e.sh expose      # 에이전트를 토큰과 함께 다시 시작하고 테스트
+```
+- **A(정식 설치)**: 에이전트를 Tailscale 주소(`100.x.x.x`)에 직접 연다.
+- **B(사용자 영역)**: 서버에 Tailscale 인터페이스가 없어서 `127.0.0.1`에 열고 **토큰을 강제**한다(`AGENT_REQUIRE_TOKEN=1`). tailnet에서 들어온 접속이 여기로 전달된다(미검증 동작이므로 맥 화면 확인 단계에서 실제로 되는지 본다).
 - 토큰은 화면에 한 번 출력되고 `~/end2end/expose.env`(권한 600)에 저장된다. **채팅에 붙이지 말고** 맥 화면에만 입력한다.
-- 로컬 주소가 아닌 곳에 열 때 `AGENT_TOKEN`이 없으면 에이전트는 시작을 거부한다(그래서 `expose`가 토큰을 함께 만든다).
-- 해제: `bash src/EndToEnd/scripts/e2e.sh unexpose`
+- 로컬이 아닌 주소에 열 때 `AGENT_TOKEN`이 없으면 에이전트는 시작을 거부한다. 해제: `e2e.sh unexpose`
+
+### C. SSH 로컬 터널 (Tailscale 이 없을 때 임시 점검)
+```bash
+bash src/EndToEnd/scripts/e2e.sh tunnel      # 터널 명령과 서버 SSH 설정(읽을 수 있을 때)을 안내
+```
+맥 터미널에서 `ssh -N -L 8200:127.0.0.1:8200 team14@<서버 주소>`(Termius는 포트 포워딩 > Local 8200 → 127.0.0.1:8200)를 열고 `curl http://127.0.0.1:8200/api/health`로 확인한다. `administratively prohibited`가 나오면 관리자가 포워딩을 막은 것이다. 이 경우 서버는 로컬 전용(`expose` 없음) 그대로 두고 맥 `.env`의 `VITE_API_TARGET=http://127.0.0.1:8200`(기본값)을 쓴다.
 
 ### 맥에서 (맥 터미널) — 자동화되지 않는 부분
-`expose`가 마지막에 안내하는 대로 진행한다.
-
 ```bash
 cd /Users/kimchaeeun/Documents/gongsa_ing_end2end/frontend      # 맥의 end2end 작업 폴더
-cp .env.example .env        # VITE_API_TARGET=http://<expose 가 알려 준 주소>:8200 로 수정
+cp .env.example .env        # VITE_API_TARGET=http://<expose 가 알려 준 Tailscale 주소>:8200 (터널이면 기본값 그대로)
 npm install && npm run dev  # http://localhost:5173
 ```
-
-브라우저에서 `http://localhost:5173`을 열고 토큰을 입력한 뒤 확인한다.
+맥도 **같은 Tailscale 계정에 로그인**되어 있어야 한다. 브라우저에서 `http://localhost:5173`을 열고 토큰을 입력한 뒤 확인한다.
 - [ ] 샘플 갤러리 썸네일이 보인다
 - [ ] 샘플을 누르면 진행 화면에 MMR 히트맵 → 에이전트의 생각·도구 선택·관찰이 하나씩 나타난다
 - [ ] 완료되면 대시보드 맨 위에 카드가 추가되고 선택 화면으로 자동 복귀한다
@@ -180,7 +214,7 @@ bash src/EndToEnd/scripts/e2e.sh down      # 서비스 종료 (결과 DB·기준
 스크립트를 고쳤을 때 서버에 올리기 전에 맥에서 확인한다.
 
 ```bash
-bash src/EndToEnd/dev/test_e2e_script.sh         # e2e.sh 의 up / status / test / down 흐름을 가짜 서비스로 검증 (12개)
+bash src/EndToEnd/dev/test_e2e_script.sh         # e2e.sh 의 up / status / test / down / expose / tunnel 흐름을 가짜 서비스·가짜 tailscale 로 검증 (23개)
 python3 src/EndToEnd/dev/test_local.py           # 에이전트 서비스 통합 테스트 (23개)
 python3 src/EndToEnd/dev/test_build_params.py    # 기준값 생성(build_params)을 합성 데이터로 끝까지 실행 (16개, 분리 위반 중단 포함)
 ```

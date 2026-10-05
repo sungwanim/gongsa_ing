@@ -21,6 +21,7 @@ class Settings:
         self.host = e.get("AGENT_HOST", "127.0.0.1")
         self.port = int(e.get("AGENT_PORT", "8200"))
         self.token = e.get("AGENT_TOKEN", "")                     # 비어 있으면 인증 없음(로컬 전용일 때만 허용)
+        self.require_token = e.get("AGENT_REQUIRE_TOKEN", "0") == "1"   # Tailscale 사용자 영역 모드: 127.0.0.1 로도 외부(tailnet)에서 들어오므로 토큰을 강제
         self.cors_origin = e.get("AGENT_CORS_ORIGIN", "")         # 같은 출처로 쓰면(프록시) 비워 둔다
         self.data_dir = e.get("AGENT_DATA_DIR", os.path.join(E2E, "data"))
         self.refs_manifest = e.get("AGENT_REFS_MANIFEST", os.path.join(VELM, "holdout_manifest_12.csv"))
@@ -32,5 +33,7 @@ class Settings:
             raise SystemExit("AGENT_ARTIFACTS(기준값 폴더)를 지정하세요: {!r}".format(self.artifacts))
         if not (self.data_root and os.path.isdir(self.data_root)):
             raise SystemExit("AGENT_DATA_ROOT(AeBAD 폴더)를 지정하세요: {!r}".format(self.data_root))
+        if self.require_token and not self.token:
+            raise SystemExit("AGENT_REQUIRE_TOKEN=1 인데 AGENT_TOKEN 이 없습니다.")
         if self.host not in LOOPBACK and not self.token:
             raise SystemExit("로컬 주소({})가 아닌 곳에 열려면 AGENT_TOKEN(접근 토큰)이 필요합니다.".format(self.host))

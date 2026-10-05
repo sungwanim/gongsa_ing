@@ -54,6 +54,31 @@ chk "down: pid 파일 정리" "[ ! -f $E2E_HOME/logs/agent.pid ] && [ ! -f $E2E_
 $E test > "$T/test2.out" 2>&1; rc=$?
 chk "서비스가 꺼져 있으면 test 는 실패로 보고" "[ $rc -ne 0 ] && grep -q '준비되어 있지 않음' $T/test2.out"
 
+# ---- expose: 가짜 tailscale 로 두 방식(인터페이스에 직접 / 사용자 영역 모드) 검증 ----
+mkdir -p "$T/bin"
+mk_ts() { printf '#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do case "$a" in --socket=*) ;; *) args+=("$a") ;; esac; done\n[ "${args[0]:-}" = "ip" ] && echo %s && exit 0\nexit 1\n' "$1" > "$T/bin/tailscale"; chmod +x "$T/bin/tailscale"; }
+export PATH_ORIG="$PATH"
+$E expose > "$T/expose0.out" 2>&1; rc=$?
+chk "tailscale 가 없으면 expose 는 실패하고 대안(ts-setup/tunnel)을 안내" "[ $rc -ne 0 ] && grep -q 'ts-setup' $T/expose0.out && grep -q 'tunnel' $T/expose0.out"
+$E tunnel > "$T/tunnel.out" 2>&1
+chk "tunnel: ssh -L 안내에 에이전트 포트가 들어감" "grep -q 'ssh -N -L $AGENT_PORT:127.0.0.1:$AGENT_PORT' $T/tunnel.out"
+
+mk_ts 100.100.100.1          # 이 서버의 인터페이스에 없는 주소 = 사용자 영역 모드
+PATH="$T/bin:$PATH" $E expose > "$T/expose1.out" 2>&1; rc=$?
+chk "사용자 영역 모드 expose 성공" "[ $rc -eq 0 ]"
+chk "사용자 영역 모드: 127.0.0.1 에 열고 토큰을 강제(AGENT_HOST 없음, REQUIRE_TOKEN=1)" "grep -q 'AGENT_REQUIRE_TOKEN=1' $E2E_HOME/expose.env && ! grep -q 'AGENT_HOST' $E2E_HOME/expose.env"
+chk "expose.env 권한 600" "[ \"\$(stat -f %Lp $E2E_HOME/expose.env 2>/dev/null || stat -c %a $E2E_HOME/expose.env)\" = 600 ]"
+chk "expose 후 통합 테스트가 토큰으로 통과하고 토큰 없이는 401" "grep -q '토큰 없이 접근하면 401' $T/expose1.out && ! grep -q '\[FAIL\]' $T/expose1.out"
+chk "맥 접속 안내에 tailnet 주소가 들어감" "grep -q 'VITE_API_TARGET=http://100.100.100.1:$AGENT_PORT' $T/expose1.out"
+$E unexpose > "$T/unexpose.out" 2>&1
+chk "unexpose: 설정 파일 삭제" "[ ! -f $E2E_HOME/expose.env ]"
+$E down > /dev/null 2>&1
+
+mk_ts 127.0.0.1              # 이 서버의 인터페이스에 있는 주소 = 정식 설치(커널 모드) 흉내
+PATH="$T/bin:$PATH" $E expose > "$T/expose2.out" 2>&1; rc=$?
+chk "정식 설치 모드 expose 성공, AGENT_HOST 가 tailscale 주소로 설정" "[ $rc -eq 0 ] && grep -q 'AGENT_HOST=127.0.0.1' $E2E_HOME/expose.env && ! grep -q REQUIRE $E2E_HOME/expose.env"
+$E unexpose > /dev/null 2>&1; $E down > /dev/null 2>&1
+
 echo; echo "e2e.sh 회귀 테스트: $ok / $total 통과"
 pkill -f "$T/EndToEnd" 2>/dev/null; rm -rf "$T"
 [ "$ok" = "$total" ]

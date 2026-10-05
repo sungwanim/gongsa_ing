@@ -10,8 +10,11 @@
 #     test         통합·안전 테스트 (검사 N장, 이벤트·시간, 경로 비노출, 참고 이미지 경고 등)
 #     status       서비스·GPU 상태
 #     down         서비스 종료
+#     ts-setup     (sudo 없이) Tailscale 을 ~/end2end/tailscale 에 받아 사용자 영역 모드로 실행하고 로그인 주소를 안내
+#     ts-down      ts-setup 으로 띄운 tailscaled 종료
 #     expose       Tailscale 주소 + 접근 토큰으로 에이전트를 다시 시작 (외부 접속용)
 #     unexpose     expose 설정 해제(로컬 전용으로 복귀)
+#     tunnel       Tailscale 이 없을 때 쓰는 SSH 로컬 터널 안내 (서버에는 아무것도 새로 열지 않음)
 #     report       결과표 출력 (~/end2end/logs/report.md)
 #     all          init -> check -> params -> verify-mmr -> up -> test  (실패하면 중단, KEEP_GOING=1 이면 계속)
 #
@@ -27,6 +30,7 @@ RESULTS="$LOGS/results.tsv"
 mkdir -p "$LOGS"
 [ -f "$E2E_HOME/e2e.conf" ] && . "$E2E_HOME/e2e.conf"          # 사용자 설정(선택)
 [ -f "$E2E_HOME/expose.env" ] && . "$E2E_HOME/expose.env"      # expose 가 만든 외부 접속 설정(AGENT_HOST, AGENT_TOKEN)
+[ -f "$E2E_HOME/tailscale.env" ] && . "$E2E_HOME/tailscale.env"  # ts-setup 이 만든 사용자 영역 Tailscale 소켓
 
 E2E_ROOT="${E2E_ROOT:-$(cd "$E2E_SRC/../.." && pwd)}"
 DATA_ROOT_USER="${DATA_ROOT:-}"
@@ -325,6 +329,7 @@ start_agent() {
            AGENT_PORT="$AGENT_PORT" AGENT_ENV="$AGENT_ENV"
     [ -n "${AGENT_HOST:-}" ] && export AGENT_HOST
     [ -n "${AGENT_TOKEN:-}" ] && export AGENT_TOKEN
+    [ -n "${AGENT_REQUIRE_TOKEN:-}" ] && export AGENT_REQUIRE_TOKEN
     [ -n "${AGENT_REFS_MANIFEST:-}" ] && export AGENT_REFS_MANIFEST
     [ -n "${AGENT_REF_PX:-}" ] && export AGENT_REF_PX
     cd "$E2E_SRC" || exit 1
@@ -408,33 +413,135 @@ PY
 }
 
 # ------------------------------------------------------------------ expose / unexpose
+TS_HOME="${TS_HOME:-$E2E_HOME/tailscale}"
+
+ts_bin() {   # tailscale CLI 경로: PATH 에 있으면 그것, 아니면 ts-setup 이 받은 것
+  if command -v tailscale >/dev/null 2>&1; then command -v tailscale
+  elif [ -x "$TS_HOME/tailscale" ]; then echo "$TS_HOME/tailscale"
+  fi
+}
+
+ts_cli() {   # TAILSCALE_SOCKET 이 있으면(사용자 영역 모드) 그 소켓으로 tailscale 을 실행
+  local bin; bin="$(ts_bin)" || return 1
+  [ -n "$bin" ] || return 1
+  if [ -n "${TAILSCALE_SOCKET:-}" ]; then "$bin" --socket="$TAILSCALE_SOCKET" "$@"
+  elif [ -S "$TS_HOME/tailscaled.sock" ] && [ "$bin" = "$TS_HOME/tailscale" ]; then "$bin" --socket="$TS_HOME/tailscaled.sock" "$@"
+  else "$bin" "$@"; fi
+}
+
+ip_is_local() {   # 이 서버의 네트워크 인터페이스에 붙어 있는 주소인가 (사용자 영역 모드에서는 아님)
+  python3 - "$1" <<'PY'
+import socket, sys
+s = socket.socket()
+try:
+    s.bind((sys.argv[1], 0))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+cmd_ts_setup() {
+  head_ "Tailscale 사용자 영역 설치 (sudo 없음, $TS_HOME 아래에만 설치)"
+  if [ -n "$(ts_bin)" ] && ts_cli ip -4 >/dev/null 2>&1; then info "이미 연결되어 있습니다: $(ts_cli ip -4 | head -1)"; return 0; fi
+  if [ -z "$(ts_bin)" ] || [ ! -x "$TS_HOME/tailscaled" ] && ! command -v tailscaled >/dev/null 2>&1; then
+    command -v curl >/dev/null 2>&1 || { res ts_setup "Tailscale 설치" "curl 이 없습니다" FAIL; return 1; }
+    local arch; case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) res ts_setup "Tailscale 설치" "지원하지 않는 CPU: $(uname -m)" FAIL; return 1 ;; esac
+    local tgz; tgz="$(curl -fsSL https://pkgs.tailscale.com/stable/ 2>/dev/null | grep -oE "tailscale_[0-9]+\.[0-9]+\.[0-9]+_${arch}\.tgz" | sort -V | tail -1)"
+    if [ -z "$tgz" ]; then res ts_setup "Tailscale 설치" "내려받을 파일을 찾지 못함 (서버에서 pkgs.tailscale.com 에 접속이 안 될 수 있음. 관리자에게 설치를 요청하세요)" FAIL; return 1; fi
+    info "내려받는 파일: https://pkgs.tailscale.com/stable/$tgz"
+    mkdir -p "$TS_HOME"
+    curl -fsSL "https://pkgs.tailscale.com/stable/$tgz" -o "$TS_HOME/$tgz" && tar -xzf "$TS_HOME/$tgz" -C "$TS_HOME" --strip-components=1 \
+      || { res ts_setup "Tailscale 설치" "내려받기/풀기 실패" FAIL; return 1; }
+    rm -f "$TS_HOME/$tgz"
+  fi
+  [ -x "$TS_HOME/tailscaled" ] || { res ts_setup "Tailscale 설치" "$TS_HOME/tailscaled 가 없습니다" FAIL; return 1; }
+  if ! alive "$LOGS/tailscaled.pid"; then
+    ( cd "$TS_HOME" || exit 1
+      nohup "$TS_HOME/tailscaled" --tun=userspace-networking --socket="$TS_HOME/tailscaled.sock" --state="$TS_HOME/tailscaled.state" > "$LOGS/tailscaled.log" 2>&1 &
+      echo $! > "$LOGS/tailscaled.pid" )
+    sleep 3
+    alive "$LOGS/tailscaled.pid" || { res ts_setup "tailscaled 실행" "시작 직후 종료됨" FAIL; show_tail_on_fail "$LOGS/tailscaled.log" 15; return 1; }
+  fi
+  local authkey=(); [ -n "${TS_AUTHKEY:-}" ] && authkey=(--authkey="$TS_AUTHKEY")
+  ( "$TS_HOME/tailscale" --socket="$TS_HOME/tailscaled.sock" up --hostname="${TS_HOSTNAME:-$(hostname)-e2e}" "${authkey[@]+"${authkey[@]}"}" > "$LOGS/tailscale_up.log" 2>&1 & echo $! > "$LOGS/tailscale_up.pid" )
+  local t=0 ip=""
+  while [ "$t" -lt 90 ]; do
+    ip="$("$TS_HOME/tailscale" --socket="$TS_HOME/tailscaled.sock" ip -4 2>/dev/null | head -1)"
+    [ -n "$ip" ] && break
+    if grep -qE "https://login\.tailscale\.com/[A-Za-z0-9/_-]+" "$LOGS/tailscale_up.log" 2>/dev/null && [ "$t" -eq 0 -o "$t" -eq 15 -o "$t" -eq 45 ]; then
+      info "아래 주소를 브라우저(아무 기기)에서 열어 Tailscale 에 로그인하세요: $(grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9/_-]+' "$LOGS/tailscale_up.log" | head -1)"
+    fi
+    sleep 3; t=$((t + 3))
+  done
+  if [ -n "$ip" ]; then
+    export TAILSCALE_SOCKET="$TS_HOME/tailscaled.sock"
+    printf 'export TAILSCALE_SOCKET=%s\n' "$TS_HOME/tailscaled.sock" > "$E2E_HOME/tailscale.env"
+    res ts_setup "Tailscale (사용자 영역 모드)" "연결됨: $ip" PASS
+    info "다음: bash scripts/e2e.sh expose"
+  else
+    res ts_setup "Tailscale (사용자 영역 모드)" "로그인이 완료되지 않음. 로그: $LOGS/tailscale_up.log" FAIL; show_tail_on_fail "$LOGS/tailscale_up.log" 10; return 1
+  fi
+}
+
+cmd_ts_down() {
+  head_ "Tailscale(사용자 영역) 종료"
+  for p in tailscale_up tailscaled; do
+    if alive "$LOGS/$p.pid"; then kill "$(cat "$LOGS/$p.pid")" 2>/dev/null; rm -f "$LOGS/$p.pid"; ok "$p 종료"; else info "$p: 이미 꺼져 있음"; fi
+  done
+}
+
+cmd_tunnel() {
+  head_ "SSH 로컬 터널 (Tailscale 이 없을 때) — 서버에는 아무것도 새로 열리지 않는다"
+  info "에이전트는 127.0.0.1:$AGENT_PORT 에만 열려 있습니다. 맥에서 아래처럼 SSH 터널을 열면 맥의 localhost:$AGENT_PORT 로 접속됩니다."
+  echo "  맥 터미널:  ssh -N -L ${AGENT_PORT}:127.0.0.1:${AGENT_PORT} $(whoami)@<서버 주소>"
+  echo "  (Termius 를 쓴다면: 포트 포워딩 > Local, 로컬 포트 $AGENT_PORT, 목적지 127.0.0.1:$AGENT_PORT)"
+  echo "  확인(맥):   curl http://127.0.0.1:$AGENT_PORT/api/health"
+  echo "  프론트엔드: VITE_API_TARGET=http://127.0.0.1:$AGENT_PORT (기본값 그대로)"
+  local cfg; cfg="$(grep -rhiE '^[[:space:]]*AllowTcpForwarding' /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null | head -2 | tr '\n' ' ')"
+  info "서버 SSH 설정(읽을 수 있을 때만): ${cfg:-읽을 수 없음. 'administratively prohibited' 가 나오면 관리자가 포워딩을 막은 것}"
+}
+
 cmd_expose() {
   head_ "외부 접속 설정 (Tailscale + 접근 토큰)"
-  command -v tailscale >/dev/null 2>&1 || { res expose "외부 접속" "tailscale 를 찾을 수 없음 — 서버 관리자에게 설치/권한을 문의하세요 (포트 포워딩은 쓰지 않습니다)" FAIL; return 1; }
-  local ip; ip="$(tailscale ip -4 2>/dev/null | head -1)"
-  [ -n "$ip" ] || { res expose "외부 접속" "Tailscale 주소를 얻지 못함 (tailscale up 이 되어 있는지 확인)" FAIL; return 1; }
-  local token
+  [ -f "$E2E_HOME/tailscale.env" ] && . "$E2E_HOME/tailscale.env"
+  if [ -z "$(ts_bin)" ]; then
+    res expose "외부 접속" "tailscale 가 없음. 관리자 설치 또는 'e2e.sh ts-setup'(sudo 없이 사용자 영역). 임시로는 'e2e.sh tunnel'(SSH 터널)" FAIL; return 1
+  fi
+  local ip; ip="$(ts_cli ip -4 2>/dev/null | head -1)"
+  [ -n "$ip" ] || { res expose "외부 접속" "Tailscale 주소를 얻지 못함 (① 로그인: sudo tailscale up 또는 e2e.sh ts-setup  ② 권한 문제면 관리자가 'sudo tailscale set --operator=\$USER' 를 한 번 실행)" FAIL; return 1; }
+  local token mode
   token="$(openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets;print(secrets.token_hex(24))')"
   umask 077
-  printf 'export AGENT_HOST=%s\nexport AGENT_TOKEN=%s\n' "$ip" "$token" > "$E2E_HOME/expose.env"
-  AGENT_HOST="$ip"; AGENT_TOKEN="$token"; export AGENT_HOST AGENT_TOKEN
+  if ip_is_local "$ip"; then
+    mode="바인딩: Tailscale 주소($ip)에 직접 열림"
+    printf 'export AGENT_HOST=%s\nexport AGENT_TOKEN=%s\n' "$ip" "$token" > "$E2E_HOME/expose.env"
+    AGENT_HOST="$ip"
+  else
+    mode="사용자 영역 모드: 서버에는 Tailscale 인터페이스가 없어 127.0.0.1 에 열고 tailnet 의 접속이 여기로 전달됨(토큰 필수)"
+    printf 'export AGENT_TOKEN=%s\nexport AGENT_REQUIRE_TOKEN=1\n' "$token" > "$E2E_HOME/expose.env"
+    unset AGENT_HOST
+  fi
+  AGENT_TOKEN="$token"; export AGENT_TOKEN; [ -n "${AGENT_HOST:-}" ] && export AGENT_HOST; [ -f "$E2E_HOME/expose.env" ] && grep -q REQUIRE "$E2E_HOME/expose.env" && export AGENT_REQUIRE_TOKEN=1
+  info "$mode"
   if alive "$LOGS/agent.pid"; then
-    info "에이전트를 새 주소로 다시 시작합니다"
+    info "에이전트를 새 설정으로 다시 시작합니다"
     stop_service agent || { res expose "외부 접속" "기존 에이전트가 종료되지 않음. 잠시 후 다시 실행하세요" FAIL; return 1; }
   fi
   start_agent || return 1
   N_TEST=1 cmd_test || true
   echo
   info "맥에서 접속하는 방법:"
-  echo "  1) 맥의 frontend/.env 에  VITE_API_TARGET=http://$ip:$AGENT_PORT  를 넣고 npm run dev"
+  echo "  1) 맥의 frontend/.env 에  VITE_API_TARGET=http://$ip:$AGENT_PORT  를 넣고 npm run dev  (맥도 같은 Tailscale 계정에 로그인되어 있어야 함)"
   echo "  2) 브라우저에서 http://localhost:5173 을 열고 아래 토큰을 입력 (채팅에 붙이지 마세요)"
   echo "     토큰: $token"
   info "토큰은 $E2E_HOME/expose.env (권한 600) 에 있습니다. 해제: e2e.sh unexpose"
+  res expose "외부 접속" "Tailscale 주소 $ip:$AGENT_PORT ($mode)" PASS
 }
 
 cmd_unexpose() {
   head_ "외부 접속 해제"
-  rm -f "$E2E_HOME/expose.env"; unset AGENT_HOST AGENT_TOKEN
+  rm -f "$E2E_HOME/expose.env"; unset AGENT_HOST AGENT_TOKEN AGENT_REQUIRE_TOKEN
   if alive "$LOGS/agent.pid"; then stop_service agent || wr "에이전트가 아직 종료되지 않았습니다. 잠시 후 e2e.sh status"; fi
   info "로컬 전용 설정으로 돌아갔습니다. 다시 시작: e2e.sh up"
 }
@@ -498,6 +605,9 @@ main() {
     test) cmd_test; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;
     status) cmd_status ;;
     down) cmd_down ;;
+    ts-setup) cmd_ts_setup; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;
+    ts-down) cmd_ts_down ;;
+    tunnel) cmd_tunnel ;;
     expose) cmd_expose; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;
     unexpose) cmd_unexpose ;;
     report) cmd_report ;;
