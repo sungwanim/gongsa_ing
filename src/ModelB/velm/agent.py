@@ -98,6 +98,10 @@ class ToolBox:
                     r["rscore"], self.tau_lo, "낮음 -> 정상 확정 구간" if r["zone10"] == "clear_normal" else "높음")
                 ev["rscore"] = r["rscore"]
             txt += ", 구간 {}".format({"clear_normal": "정상 확정", "amb": "애매", "confident": "확실한 불량"}[r["zone10"]])
+            txt += ". 안내: " + {
+                "confident": "이미 불량으로 확정된 구간이라 정상으로 바뀌지 않음, 불량 종류가 필요하면 ask_whole",
+                "clear_normal": "더 확인하지 않으면 정상으로 남음, 정상 확정이 틀렸는지 보려면 ask_whole",
+                "amb": "정상으로 인정하려면 ask_whole 결과가 반드시 필요함"}[r["zone10"]]
             if self.maps is not None:
                 import region_crop as rc
                 f = rc.map_features(self.maps.get(q.resolve(r["path"])))
@@ -140,12 +144,22 @@ class MockBrain:
         return "증거가 충분하다.", "decide"
 
 
-class QwenBrain:
-    """Qwen2-VL 에이전트: 짧은 생각을 쓰고, 도구 이름의 첫 토큰 확률로 행동을 고른다. (GPU, 이 파일 기준 아직 서버에서 시험 전)"""
+TOOL_HELP = {
+    "read_map": "Read a summary of the anomaly detector output for this photo (scores, zone, anomaly shape).",
+    "ask_whole": "Compare the whole photo with 12 labeled defect reference photos and get P(normal) and the likely defect type. "
+                 "A blade can only be judged NORMAL if this check was done.",
+    "second_prompt": "Ask the same photo again with a different prompt for a second opinion. Optional; it can only raise suspicion, never clear a blade.",
+    "decide": "Finish and give the final verdict. Use it when you have enough evidence; extra checks cost time.",
+}
 
-    def __init__(self, model, processor):
+
+class QwenBrain:
+    """Qwen2-VL 에이전트: 짧은 생각을 쓰고, 도구 이름의 첫 토큰 확률로 행동을 고른다. 선택 확률은 self.last_probs 에 남는다."""
+
+    def __init__(self, model, processor, t=0.98):
         import torch
-        self.torch, self.model, self.processor = torch, model, processor
+        self.torch, self.model, self.processor, self.t = torch, model, processor, t
+        self.last_probs = None
         self.device = next(p.device for p in model.parameters() if p.device.type != "meta")
         tok = processor.tokenizer
         self.ids = {}
@@ -155,10 +169,14 @@ class QwenBrain:
             raise RuntimeError("도구 이름의 첫 토큰이 겹칩니다: {}".format(self.ids))
 
     def _prompt(self, r, log, ev, options, thought=None):
-        tools = "\n".join("- {}: {}".format(n, TOOLS[n]) for n in options)
+        tools = "\n".join("- {}: {}".format(n, TOOL_HELP.get(n, TOOLS[n])) for n in options)
+        rules = ("Inspection rules:\n"
+                 "- A blade is judged NORMAL only if the ask_whole check gives P(normal) >= {t} and no other check disagrees. Otherwise it is judged DEFECTIVE.\n"
+                 "- Without ask_whole the blade cannot be judged normal.\n"
+                 "- Extra checks cost time, so stop with decide once you have enough evidence.").format(t=self.t)
         hist = "\n".join("Action: {}\nObservation: {}".format(a, o) for a, o in log) or "(no checks yet)"
-        user = ("You are an aircraft engine blade inspection agent.\n{}\n\nAvailable tools:\n{}\n\nSo far:\n{}\n\n"
-                "Write one short sentence of reasoning about what to do next, then choose the tool.\nThought:").format(GOAL, tools, hist)
+        user = ("You are an aircraft engine blade inspection agent.\n{}\n\n{}\n\nAvailable tools:\n{}\n\nSo far:\n{}\n\n"
+                "Write one short sentence of reasoning about what to do next, then choose the tool.\nThought:").format(GOAL, rules, tools, hist)
         msgs = [{"role": "user", "content": [{"type": "text", "text": user}]}]
         text = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
         return text + ("" if thought is None else " {}\nAction:".format(thought))
@@ -174,7 +192,9 @@ class QwenBrain:
         with torch.no_grad():
             logits = self.model(**inp2).logits[0, -1].float()
         lp = torch.log_softmax(logits, -1)
-        best = max(options, key=lambda n: float(lp[self.ids[n]]))
+        sel = torch.softmax(torch.stack([lp[self.ids[n]] for n in options]), 0)
+        self.last_probs = {n: round(float(p), 3) for n, p in zip(options, sel)}
+        best = max(options, key=lambda n: self.last_probs[n])
         return thought, best
 
 
@@ -202,17 +222,18 @@ def run_agent(r, brain, tools, t, max_steps=5, auto_map=False, auto_whole=False,
         for _ in range(max_steps):
             options = tools.available(ev, used)
             thought, action = brain.step(r, log, ev, options)
+            cp = getattr(brain, "last_probs", None)
             if action not in options:
                 action = "decide"
             if action == "decide":
                 if auto_whole and "ask_whole" not in used:
                     auto("ask_whole", "(자동 보완) 전체 사진 판정이 빠져 있어 먼저 실행한다")
-                trace.append({"thought": thought, "action": "decide", "observation": "확정"})
+                trace.append({"thought": thought, "action": "decide", "observation": "확정", "choice_probs": cp})
                 break
             obs = tools.run(action, r, ev)
             used.add(action)
             log.append((action, obs))
-            trace.append({"thought": thought, "action": action, "observation": obs})
+            trace.append({"thought": thought, "action": action, "observation": obs, "choice_probs": cp})
     dec, why = final_decision(r["zone10"], ev, t)
     return {"key": q.key(r), "zone": r["zone10"], "true": r["type"], "label": r["label"], "pred_defect": dec,
             "type": defect_type(ev) if dec else "good", "why": why, "evidence": {k: v for k, v in ev.items() if k != "probs_whole"},
@@ -282,7 +303,7 @@ def main():
     else:
         from run_qwen import load_model
         model, processor = load_model()
-        brain = QwenBrain(model, processor)
+        brain = QwenBrain(model, processor, t=t)
 
     if not a.eval:
         return
