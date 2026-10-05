@@ -27,3 +27,32 @@ python offline/build_params.py \
   --out <새 폴더>
 python offline/separation.py --artifacts <새 폴더>
 ```
+
+## 구현 현황
+- [x] 2단계 `offline/` 기준값 생성·분리 검증 (서버 실행 필요, 미실행)
+- [x] 3단계 `mmr_service/` MMR 단일 이미지 추론 서비스(표준 라이브러리 HTTP, 요청 때 로드·해제)
+- [x] 4단계 `agent_service/` 에이전트 서비스 (표준 라이브러리 HTTP + SSE + SQLite). 기존 `agent.py` 무수정, 온라인 어댑터로 실행
+- [ ] 5단계 프론트 연동 (`frontend/`)
+- [ ] 6단계 서버 통합 점검
+
+모의 모드 테스트(GPU 불필요): `python dev/test_local.py`
+
+## 실행 (서버, conda 환경 2개, 설치 없음)
+```bash
+# 1) MMR 서비스 (환경 mmr)  - 로컬(127.0.0.1)에만 열림
+MMR_CKPT=<.../checkpoints/MMR_aebad_S_AeBAD_S.pth> bash scripts/run_mmr.sh
+
+# 2) 에이전트 서비스 (환경 velm_qwen)
+AGENT_ARTIFACTS=<build_params 출력 폴더> AGENT_DATA_ROOT=<AeBAD 폴더> bash scripts/run_agent.sh
+```
+
+## 외부 접속 (포트 포워딩 금지, Tailscale 등 VPN 전제)
+- 기본은 `127.0.0.1` 에만 연다. 외부(Tailscale 주소 등)에 열려면 `AGENT_HOST=<주소>` 와 `AGENT_TOKEN=<긴 무작위 문자열>` 이 **둘 다** 필요하다(토큰 없이 로컬이 아닌 주소로는 시작하지 않음).
+- MMR 서비스는 내부용이라 항상 로컬에만 둔다. 인터넷에 직접 노출하지 않는다.
+- 보안 장치: 접근 토큰(Bearer 또는 `?token=`), 업로드 크기·형식 검사, 동시 처리 1건, 갤러리는 id 로만 접근(경로 노출 없음), 업로드 파일명 미저장.
+- Tailscale 설치·연결 상태는 확인하지 못했다(서버 접속 불가). 서버에서 Tailscale 을 쓸 수 있는지는 관리자 확인이 필요하다.
+
+## 검증하지 못한 것 (서버에서 확인)
+- 실제 MMR 추론이 기존 점수와 같은지 (`mmr_service/verify_mmr.py`), 교사 네트워크 가중치 캐시 유무
+- `qwen_backend.py` 의 실제 Qwen 경로(참고 이미지 캐시, 두뇌, v7)와 GPU 메모리(MMR 요청 때 로드 + Qwen 상주 합계, 18GB 조각)
+- 이미지 한 장당 소요 시간 (가정: 30초 안팎)
