@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CLASSES, DEFECT_ORDER, TOOLS, ZONES, typeLabel } from '../config'
+import { CLASSES, DEFECT_ORDER, TOOLS, ZONES, koText, typeLabel } from '../config'
 import type { Verdict } from '../types'
 import type { RunState } from '../runState'
 import HeatmapCanvas from './HeatmapCanvas'
@@ -75,7 +75,7 @@ export default function RunView({ run }: { run: RunState }) {
               {s.running && <p className="muted">{TOOLS[s.tool ?? ''] ?? '도구'}를 실행하는 중이에요…</p>}
               {s.observation && (
                 <div className="obs">
-                  {s.observation}
+                  {koText(s.observation)}
                   {s.sec !== undefined && <em> · {s.sec.toFixed(1)}초</em>}
                 </div>
               )}
@@ -97,7 +97,7 @@ export default function RunView({ run }: { run: RunState }) {
                   </span>
                 )}
               </h3>
-              <p className="muted">{run.final.why}</p>
+              <p className="muted">{koText(run.final.why)}</p>
               {run.final.type_probs && run.final.decision === 'defect' && (
                 <div className="prob-list">
                   {DEFECT_ORDER.map((k) => (
@@ -111,6 +111,16 @@ export default function RunView({ run }: { run: RunState }) {
                   ))}
                 </div>
               )}
+              <div className="rc-toolcalls">
+                <p className="eyebrow">도구 호출 · {run.final.tools.length}회</p>
+                <div className="chip-row">
+                  {run.final.tools.map((t, i) => (
+                    <span key={i} className="chip primary">
+                      {i + 1}. {TOOLS[t] ?? t}
+                    </span>
+                  ))}
+                </div>
+              </div>
               <p className="hint">대시보드에 추가하고 있어요…</p>
             </div>
           </li>

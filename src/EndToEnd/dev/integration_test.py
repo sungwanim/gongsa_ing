@@ -2,7 +2,7 @@
 
   1) health / 갤러리 응답 형태(경로·정답 비노출) / 썸네일
   2) 갤러리 이미지 N장 검사: 이벤트 순서, 판정 결과, 소요 시간
-  3) 안전: 참고 이미지 업로드 시 경고, 이미지가 아닌 파일 거절, 대시보드·갤러리 응답에 경로·해시 비노출
+  3) 안전: 참고 이미지 업로드 시 거절(422), 이미지가 아닌 파일 거절, 대시보드·갤러리 응답에 경로·해시 비노출
   4) (--expect-auth) 토큰 없이 접근하면 401
 결과는 PASS/FAIL/WARN 줄과 --json-out 요약으로 낸다. 종료 코드: FAIL 이 있으면 1.
 """
@@ -116,11 +116,12 @@ def main():
     ref_path = os.path.join(a.data_root, refs[0]["file"]) if refs else None
     if ref_path and os.path.isfile(ref_path):
         try:
-            events, _ = sse(base + "/api/inspect", tok, data=open(ref_path, "rb").read())
-            w = dict(events).get("start", {}).get("warning")
-            check("참고 이미지를 올리면 경고", bool(w) and "참고" in w, str(w))
+            sse(base + "/api/inspect", tok, data=open(ref_path, "rb").read())
+            check("참고 이미지를 올리면 판정 없이 거절(422)", False, "판정이 진행됨")
+        except urllib.error.HTTPError as e:
+            check("참고 이미지를 올리면 판정 없이 거절(422)", e.code == 422, "HTTP {}".format(e.code))
         except Exception as e:
-            check("참고 이미지 업로드", False, str(e))
+            check("참고 이미지 업로드 점검", False, str(e))
     else:
         check("참고 이미지 업로드 경고 점검", False, "참고 이미지 파일을 찾지 못해 건너뜀", warn=True)
     try:

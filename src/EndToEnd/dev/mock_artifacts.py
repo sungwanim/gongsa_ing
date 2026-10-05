@@ -40,7 +40,7 @@ def make(out, n_gallery=6):
     json.dump({"tau_lo": -0.5, "tau_hi": 1.2, "t": 0.98,
                "router": {"mean": [0.45] + [0.0] * (f - 1), "scale": [0.1] + [1.0] * (f - 1), "coef": [1.0] + [0.0] * (f - 1), "intercept": 0.0}},
               open(os.path.join(out, "params.json"), "w"))
-    return {"gallery": items, "calib_file": os.path.join(out, calib_rel)}
+    return {"gallery": items, "calib_file": os.path.join(out, calib_rel), "refs_file": os.path.join(out, ref_rel)}
 
 
 if __name__ == "__main__":

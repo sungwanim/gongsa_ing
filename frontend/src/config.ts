@@ -37,3 +37,9 @@ export const TOOLS: Record<string, string> = {
 
 export const typeLabel = (t: string | null): string =>
   t && t in CLASSES ? CLASSES[t as Verdict].label : t === 'unknown' ? '종류 미확인' : t ?? ''
+
+/** 서버가 보낸 글에 남아 있는 영어 도구 이름·분류 이름을 한국어 화면 용어로 바꾼다 (표시 전용) */
+export const koText = (text: string): string =>
+  text
+    .replace(/\b(read_map|ask_whole|second_prompt|zoom_check|decide)\b/g, (m) => `‘${TOOLS[m]}’`)
+    .replace(/\b(normal|ablation|breakdown|fracture|groove)\b/gi, (m) => CLASSES[m.toLowerCase() as Verdict]?.label ?? m)

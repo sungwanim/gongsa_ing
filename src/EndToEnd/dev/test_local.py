@@ -94,10 +94,25 @@ def main():
     # 안전장치: 애매 구간에서 ask_whole 없이 정상이 되면 안 됨
     check("애매 구간은 ask_whole 없이 정상 불가", all(not (z == "amb" and d == "normal" and "ask_whole" not in t) for z, d, t in decisions))
 
-    # 참고/보정 이미지 해시 경고
-    ev = sse(base + "/api/inspect", open(info["calib_file"], "rb").read())
-    w = dict(ev)["start"]["warning"]
-    check("보정 이미지와 같은 파일이면 경고", w and "파라미터 계산" in w, str(w))
+    # 참고/보정 이미지는 판정하지 않고 거절(422) -> 다시 선택
+    n_before = len(app.store.list(include_test=True))
+    for name, key in [("보정", "calib_file"), ("참고", "refs_file")]:
+        if key not in info:
+            continue
+        try:
+            sse(base + "/api/inspect", open(info[key], "rb").read())
+            check(name + " 이미지 업로드는 거절", False, "판정이 진행됨")
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode())
+            check(name + " 이미지 업로드는 422 + reference_image", e.code == 422 and body.get("code") == "reference_image", str(body))
+    check("거절된 업로드는 대시보드에 저장되지 않음", len(app.store.list(include_test=True)) == n_before)
+
+    # 생각 한국어 변환: 한글이면 그대로, 번역 실패 시 영어 원문 유지(검사를 막지 않음)
+    from qwen_backend import KoreanThoughtBrain
+    kb = KoreanThoughtBrain(type("B", (), {"last_probs": {"decide": 1.0}})())
+    check("한글 생각은 그대로", kb.to_korean("지도를 먼저 읽자") == "지도를 먼저 읽자")
+    check("번역 실패 시 영어 원문 사용", kb.to_korean("Read the map first.") == "Read the map first.")
+    check("선택 확률은 안쪽 두뇌 것을 전달", kb.last_probs == {"decide": 1.0})
 
     # 오류 처리
     for name, data, code in [("이미지 아님", b"not an image", 400)]:
@@ -118,7 +133,7 @@ def main():
 
     # 대시보드
     items = json.loads(get(base + "/api/dashboard")[1])["items"]
-    check("대시보드에 모두 저장(최신순)", len(items) == 14 and items[0]["id"] > items[-1]["id"], str(len(items)))
+    check("대시보드에 모두 저장(최신순)", len(items) == 13 and items[0]["id"] > items[-1]["id"], str(len(items)))
     blob = json.dumps(items)
     check("대시보드에 파일명/경로/해시 없음", "sha256" not in blob and "gallery_imgs" not in blob and ".png" not in blob)
     check("기록에 trace 포함", all(isinstance(i["trace"], list) and i["trace"] for i in items))
@@ -126,7 +141,7 @@ def main():
     # 서버 재시작 후에도 유지(SQLite)
     srv.shutdown()
     app2, srv2, base2 = start(Settings(env))
-    check("재시작 후 대시보드 유지", len(json.loads(get(base2 + "/api/dashboard")[1])["items"]) == 14)
+    check("재시작 후 대시보드 유지", len(json.loads(get(base2 + "/api/dashboard")[1])["items"]) == 13)
     srv2.shutdown()
 
     # 토큰 인증

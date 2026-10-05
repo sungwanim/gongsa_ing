@@ -198,6 +198,12 @@ def make_handler(app):
                 return self._json(400, {"error": "이미지 파일이 아닙니다"})
             if fmt not in ALLOWED_FORMATS:
                 return self._json(415, {"error": "지원하지 않는 형식입니다 ({})".format(fmt)})
+            if source == "upload":
+                # 퓨샷 참고 이미지나 파라미터 계산(보정)에 쓴 이미지는 데모에 쓸 수 없다: 판정하지 않고 다시 고르게 한다
+                used = sep.classify_upload(hashlib.sha256(data).hexdigest(), app.sep_sets)
+                if used in ("refs", "calib"):
+                    return self._json(422, {"code": "reference_image", "error": "이 이미지는 {}에 쓴 이미지라 데모에 사용할 수 없어요. 다른 이미지를 선택해 주세요.".format(
+                        {"refs": "퓨샷 참고 이미지", "calib": "기준값(파라미터) 계산"}[used])})
             if not app.busy.acquire(blocking=False):
                 return self._json(409, {"error": "다른 이미지를 처리 중입니다. 잠시 후 다시 시도하세요."})
             tmp = None

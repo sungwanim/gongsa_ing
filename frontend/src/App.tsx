@@ -37,6 +37,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [freshId, setFreshId] = useState<number | null>(null)
   const [toast, setToast] = useState('')
+  const [rejected, setRejected] = useState('')
   const [needToken, setNeedToken] = useState(false)
   const busy = useRef(false)
 
@@ -74,6 +75,7 @@ export default function App() {
     async (input: InspectInput) => {
       if (busy.current) return
       busy.current = true
+      setRejected('')
       dispatch({ type: 'start' })
       let doneId: number | null = null
       try {
@@ -83,6 +85,13 @@ export default function App() {
         })
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) setNeedToken(true)
+        if (e instanceof ApiError && e.code === 'reference_image') {
+          // 참고·보정에 쓴 이미지: 판정하지 않고 바로 이미지 선택 화면으로 돌아가 다시 고르게 한다
+          setRejected(e.message)
+          dispatch({ type: 'clear' })
+          busy.current = false
+          return
+        }
         dispatch({ type: 'fail', message: e instanceof Error ? e.message : '검사에 실패했어요' })
         window.setTimeout(() => dispatch({ type: 'clear' }), 4500)
         busy.current = false
@@ -121,7 +130,10 @@ export default function App() {
           ) : running && run ? (
             <RunView run={run} />
           ) : (
-            <Picker disabled={running} onPick={(i) => void start(i)} onNeedToken={() => setNeedToken(true)} />
+            <>
+              {rejected && <div className="notice warn" role="alert">{rejected}</div>}
+              <Picker disabled={running} onPick={(i) => void start(i)} onNeedToken={() => setNeedToken(true)} />
+            </>
           )}
         </section>
 

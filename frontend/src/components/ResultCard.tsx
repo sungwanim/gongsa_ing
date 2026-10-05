@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { inspectionImageUrl } from '../api'
-import { CLASSES, DEFECT_ORDER, TOOLS, ZONES, typeLabel } from '../config'
+import { CLASSES, DEFECT_ORDER, TOOLS, ZONES, koText, typeLabel } from '../config'
 import type { Inspection, Verdict } from '../types'
 import HeatmapCanvas from './HeatmapCanvas'
 
@@ -39,7 +39,16 @@ export default function ResultCard({ item, fresh }: Props) {
           <span className="chip">{item.source === 'gallery' ? '샘플' : '업로드'}</span>
         </div>
         {item.sep_flag && <p className="notice warn small">참고·보정 이미지와 같은 파일이에요</p>}
-        <p className="rc-tools">{item.tools.map((t) => TOOLS[t] ?? t).join(' → ')}</p>
+        <div className="rc-toolcalls">
+          <p className="eyebrow">도구 호출 · {item.tools.length}회</p>
+          <div className="chip-row">
+            {item.tools.map((t, i) => (
+              <span key={i} className="chip primary">
+                {i + 1}. {TOOLS[t] ?? t}
+              </span>
+            ))}
+          </div>
+        </div>
         <p className="rc-time">{item.created_at}</p>
         <button className="link-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
           {open ? '에이전트 기록 접기' : '에이전트 기록 보기'}
@@ -47,14 +56,15 @@ export default function ResultCard({ item, fresh }: Props) {
       </div>
       {open && (
         <div className="rc-detail fade-up">
-          <p className="muted">{item.why}</p>
+          <p className="muted">{koText(item.why)}</p>
           {item.trace.map((s, i) => (
             <div className="tr" key={i}>
               <p className="eyebrow">
-                {i + 1}단계 · {TOOLS[s.action] ?? s.action}
+                {i + 1}단계 · 도구 호출: {TOOLS[s.action] ?? s.action}
+                {s.auto ? ' (자동)' : ''}
               </p>
               {s.thought && <div className="vlm-quote">“{s.thought}”</div>}
-              {s.action !== 'decide' && <div className="obs">{s.observation}</div>}
+              {s.action !== 'decide' && <div className="obs">{koText(s.observation)}</div>}
             </div>
           ))}
           {defect && item.type_probs && (

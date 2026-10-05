@@ -5,9 +5,11 @@ const TOKEN_KEY = 'e2e_token'
 
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  code?: string
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -64,12 +66,15 @@ export async function streamInspect(input: InspectInput, onEvent: (e: ServerEven
   const r = await fetch(BASE + url, init)
   if (!r.ok || !r.body) {
     let msg = `요청에 실패했어요 (${r.status})`
+    let code: string | undefined
     try {
-      msg = (await r.json()).error ?? msg
+      const body = await r.json()
+      msg = body.error ?? msg
+      code = body.code
     } catch {
       /* 본문 없음 */
     }
-    throw new ApiError(r.status, msg)
+    throw new ApiError(r.status, msg, code)
   }
   const reader = r.body.getReader()
   const dec = new TextDecoder()
