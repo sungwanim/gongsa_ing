@@ -43,6 +43,7 @@ cat ~/end2end/logs/report.md                        # 결과표 (이 내용을 �
 | `e2e.sh verify-mmr` | 온라인 MMR 추론을 기존 CSV 점수와 비교 (15장), GPU 메모리·시간 측정 | 최대 차이 `1e-3` 미만 |
 | `e2e.sh up` | MMR 서비스 → 에이전트 서비스 순서로 시작, 준비될 때까지 대기 | 두 서비스 health 정상 |
 | `e2e.sh test` | 통합·안전 테스트 (갤러리 N장 검사, 이벤트 순서, 소요 시간, 참고 이미지 경고, 이미지가 아닌 파일 거절, 경로·해시 비노출, 대시보드 저장) | 모든 항목 통과 (소요 시간 초과는 WARN) |
+| `e2e.sh dashboard list` / `dashboard clear --test-only\|--all [--yes]` | 대시보드 DB 확인 / 삭제. **삭제 전에 DB를 자동 백업**하고 `--yes`가 없으면 삭제하지 않는다 | - |
 | `e2e.sh status` / `down` | 서비스·GPU 상태 / 서비스 종료 | - |
 | `e2e.sh ts-setup` / `ts-down` | (sudo 없이) Tailscale 을 사용자 영역 모드로 설치·실행 / 종료 | 로그인 후 `100.x` 주소 획득 |
 | `e2e.sh expose` / `unexpose` | Tailscale 주소 + 접근 토큰으로 외부 접속 설정 / 해제 | 토큰 없이 접근하면 401 |
@@ -52,6 +53,18 @@ cat ~/end2end/logs/report.md                        # 결과표 (이 내용을 �
 - 단계별로 따로 실행해도 되고(`bash src/EndToEnd/scripts/e2e.sh params` 등), 결과표는 실행할 때마다 갱신된다.
 - 원본 로그는 `~/end2end/logs/`에 남는다: `params.log`, `separation.log`, `verify_mmr.log`, `mmr.log`, `agent.log`, `test.log`, `test.json`.
 - 맥에서 `check`를 돌리면 서버 환경이 없어서 FAIL이 나오는 것이 정상이다(점검이 제대로 실패를 보고하는지 확인용).
+
+## 대시보드에 점검 기록이 남는 문제
+
+`e2e.sh test`/`expose`의 점검 검사는 `X-E2E-Test: 1` 헤더로 **점검용으로 표시**되어 대시보드 기본 목록에 보이지 않고, 점검이 끝나면 **자동으로 삭제**된다(사용자의 실제 검사 기록은 건드리지 않음). 직접 서비스를 확인하는 `dev/sse_probe.py`는 `--test`를 붙이면 같은 방식으로 표시된다.
+
+이 수정 **이전에** 점검으로 쌓인 기록은 표시가 없어서 그대로 남아 있다. 서버에서 확인하고 정리한다.
+```bash
+bash src/EndToEnd/scripts/e2e.sh dashboard list                 # 건수와 최근 기록(시각·종류·판정·소요 시간)
+bash src/EndToEnd/scripts/e2e.sh dashboard clear --all          # 삭제 대상 건수만 보여 줌 (삭제 안 함)
+bash src/EndToEnd/scripts/e2e.sh dashboard clear --all --yes    # DB 백업 후 전부 삭제
+```
+백업은 `~/end2end/data/dashboard_backup_<시각>.sqlite3`로 남는다. 서비스가 켜져 있어도 안전하다. 기존 DB는 처음 열 때 자동으로 열만 추가되고(마이그레이션) 기록은 그대로 보존된다.
 
 ## 결과표 읽는 법
 
@@ -214,8 +227,8 @@ bash src/EndToEnd/scripts/e2e.sh down      # 서비스 종료 (결과 DB·기준
 스크립트를 고쳤을 때 서버에 올리기 전에 맥에서 확인한다.
 
 ```bash
-bash src/EndToEnd/dev/test_e2e_script.sh         # e2e.sh 의 up / status / test / down / expose / tunnel 흐름을 가짜 서비스·가짜 tailscale 로 검증 (23개)
-python3 src/EndToEnd/dev/test_local.py           # 에이전트 서비스 통합 테스트 (23개)
+bash src/EndToEnd/dev/test_e2e_script.sh         # e2e.sh 의 up / status / test / down / expose / tunnel / dashboard 흐름을 가짜 서비스·가짜 tailscale 로 검증 (28개)
+python3 src/EndToEnd/dev/test_local.py           # 에이전트 서비스 통합 테스트 (28개)
 python3 src/EndToEnd/dev/test_build_params.py    # 기준값 생성(build_params)을 합성 데이터로 끝까지 실행 (16개, 분리 위반 중단 포함)
 ```
 

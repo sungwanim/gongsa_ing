@@ -14,8 +14,13 @@ import urllib.error
 import urllib.request
 
 
+TEST_FLAG = []
+
+
 def req(url, token, data=None, method=None):
     r = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"))
+    if TEST_FLAG:
+        r.add_header("X-E2E-Test", "1")
     if token:
         r.add_header("Authorization", "Bearer " + token)
     if data is not None:
@@ -91,7 +96,10 @@ def _main():
     ap.add_argument("--token", default="")
     ap.add_argument("--gallery", type=int, default=0)
     ap.add_argument("--file")
+    ap.add_argument("--test", action="store_true", help="이 검사를 점검용으로 표시(대시보드 기본 목록에 보이지 않음)")
     a = ap.parse_args()
+    if a.test:
+        TEST_FLAG.append(1)
     if a.cmd == "health":
         print(get_json(a.url + "/api/health", a.token))
     elif a.cmd == "dashboard":

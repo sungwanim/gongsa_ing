@@ -8,6 +8,7 @@
 #     verify-mmr   MMR 온라인 추론이 기존 점수와 같은지 검증, GPU 메모리·시간 측정
 #     up           서비스 시작 (MMR -> 에이전트), 준비될 때까지 대기
 #     test         통합·안전 테스트 (검사 N장, 이벤트·시간, 경로 비노출, 참고 이미지 경고 등)
+#     dashboard    대시보드 DB 관리: dashboard list | dashboard clear --test-only|--all [--yes]  (삭제 전 자동 백업)
 #     status       서비스·GPU 상태
 #     down         서비스 종료
 #     ts-setup     (sudo 없이) Tailscale 을 ~/end2end/tailscale 에 받아 사용자 영역 모드로 실행하고 로그인 주소를 안내
@@ -352,6 +353,11 @@ cmd_up() {
   return 0
 }
 
+cmd_dashboard() {   # dashboard list | clear [--test-only|--all] [--yes]
+  head_ "대시보드 DB ($E2E_DATA)"
+  python3 "$E2E_SRC/agent_service/dashboard_admin.py" --data-dir "$E2E_DATA" "$@"
+}
+
 cmd_status() {
   head_ "상태"
   for s in mmr agent; do
@@ -389,6 +395,8 @@ cmd_test() {
   python3 "$E2E_SRC/dev/integration_test.py" --url "$(agent_url)" ${tok:+--token "$tok" --expect-auth} \
     --artifacts "$ART" --data-root "$DATA_ROOT" -n "$N_TEST" --latency-warn "$LATENCY_WARN" --json-out "$LOGS/test.json" 2>&1 | tee "$LOGS/test.log"
   local rc=${PIPESTATUS[0]} j="$LOGS/test.json"
+  # 이 점검이 만든 테스트 검사 기록은 대시보드에 남기지 않는다 (실제 검사 기록은 건드리지 않음)
+  python3 "$E2E_SRC/agent_service/dashboard_admin.py" --data-dir "$E2E_DATA" clear --test-only --yes --quiet >/dev/null 2>&1 || true
   [ -f "$j" ] || { res test_summary "통합 테스트" "결과 파일 없음" FAIL; return 1; }
   local p f w; p="$(json_get "$j" pass)"; f="$(json_get "$j" fail)"; w="$(json_get "$j" warn)"
   if [ "$f" = "0" ]; then res test_summary "통합·안전 테스트" "PASS $p / WARN $w / FAIL $f" "$([ "$w" = "0" ] && echo PASS || echo WARN)"
@@ -415,8 +423,9 @@ PY
 # ------------------------------------------------------------------ expose / unexpose
 TS_HOME="${TS_HOME:-$E2E_HOME/tailscale}"
 
-ts_bin() {   # tailscale CLI 경로: PATH 에 있으면 그것, 아니면 ts-setup 이 받은 것
-  if command -v tailscale >/dev/null 2>&1; then command -v tailscale
+ts_bin() {   # tailscale CLI 경로: TAILSCALE_BIN(지정 시 그것만, 테스트용) > PATH > ts-setup 이 받은 것
+  if [ -n "${TAILSCALE_BIN:-}" ]; then [ -x "$TAILSCALE_BIN" ] && echo "$TAILSCALE_BIN"
+  elif command -v tailscale >/dev/null 2>&1; then command -v tailscale
   elif [ -x "$TS_HOME/tailscale" ]; then echo "$TS_HOME/tailscale"
   fi
 }
@@ -603,6 +612,7 @@ main() {
     verify-mmr) cmd_verify_mmr; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] && [ "$FAILS" = 0 ] ;;
     up) cmd_up; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;
     test) cmd_test; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;
+    dashboard) cmd_dashboard "$@" ;;
     status) cmd_status ;;
     down) cmd_down ;;
     ts-setup) cmd_ts_setup; local r=$?; cmd_report >/dev/null; [ $r -eq 0 ] ;;

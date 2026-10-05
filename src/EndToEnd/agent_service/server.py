@@ -3,7 +3,7 @@
   GET  /api/health
   GET  /api/gallery                      갤러리 목록(id 만, 경로·정답 없음)
   GET  /api/gallery/<id>/thumb | image   갤러리 이미지
-  GET  /api/dashboard                    저장된 결과(최신순)
+  GET  /api/dashboard[?include_test=1]   저장된 결과(최신순). 점검용 테스트 검사(X-E2E-Test: 1 헤더로 표시)는 기본 제외
   POST /api/inspect                      본문 = 이미지 바이트 -> SSE 스트림
   POST /api/inspect/gallery/<id>         갤러리 이미지로 같은 루프 -> SSE 스트림
 SSE 이벤트: start, mmr, tool_start, thought, action, observation, final, done, error
@@ -146,7 +146,8 @@ def make_handler(app):
                 with open(app.gallery_path(gid), "rb") as f:
                     return self._bytes(200, f.read(), "application/octet-stream")
             if path == "/api/dashboard":
-                return self._json(200, {"items": app.store.list()})
+                inc = (parse_qs(urlparse(self.path).query).get("include_test") or ["0"])[0] == "1"
+                return self._json(200, {"items": app.store.list(include_test=inc)})
             m = re.match(r"^/api/dashboard/(\d+)$", path)
             if m:
                 rec = app.store.get(int(m.group(1)))
@@ -184,6 +185,7 @@ def make_handler(app):
             if not app.busy.acquire(blocking=False):
                 return self._json(409, {"error": "다른 이미지를 처리 중입니다. 잠시 후 다시 시도하세요."})
             tmp = None
+            is_test = self.headers.get("X-E2E-Test") == "1"      # 점검 스크립트(integration_test)의 검사는 대시보드에 보이지 않게 표시한다
             alive = [True]
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -227,7 +229,7 @@ def make_handler(app):
                 rec = {"source": source, "sha256": sha, "sep_flag": flag, "mmr_score": res["mmr_score"], "rscore": res["rscore"],
                        "zone": res["zone"], "decision": res["decision"], "defect_type": res["defect_type"], "why": res["why"],
                        "tools": res["tools"], "trace": res["trace"], "type_probs": res["type_probs"], "timings": timings,
-                       "map_b64": b64, "map_shape": shp, "image_size": mmr["orig_size"]}
+                       "map_b64": b64, "map_shape": shp, "image_size": mmr["orig_size"], "is_test": is_test}
                 rid = app.store.add(rec)
                 emit("final", {"id": rid, "decision": res["decision"], "defect_type": res["defect_type"], "why": res["why"],
                                "zone": res["zone"], "tools": res["tools"], "type_probs": res["type_probs"], "timings": timings})

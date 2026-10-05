@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS inspections (
   mmr_score REAL, rscore REAL, zone TEXT,
   decision TEXT, defect_type TEXT, why TEXT,
   tools TEXT, trace TEXT, type_probs TEXT, timings TEXT,
-  map_b64 TEXT, map_shape TEXT, image_size TEXT
+  map_b64 TEXT, map_shape TEXT, image_size TEXT,
+  is_test INTEGER NOT NULL DEFAULT 0
 )"""
 
 
@@ -36,6 +37,10 @@ class Store:
         self._lock = threading.Lock()
         with self._conn() as c:
             c.execute(SCHEMA)
+            # 이전 버전으로 만든 DB 에는 is_test 열이 없다 -> 기록은 그대로 두고(is_test=0) 열만 추가한다
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(inspections)")]
+            if "is_test" not in cols:
+                c.execute("ALTER TABLE inspections ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -46,11 +51,11 @@ class Store:
         with self._lock, self._conn() as c:
             cur = c.execute(
                 "INSERT INTO inspections (created_at, source, sha256, sep_flag, mmr_score, rscore, zone, decision, defect_type, why,"
-                " tools, trace, type_probs, timings, map_b64, map_shape, image_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " tools, trace, type_probs, timings, map_b64, map_shape, image_size, is_test) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), rec["source"], rec["sha256"], rec.get("sep_flag"), rec["mmr_score"], rec["rscore"],
                  rec["zone"], rec["decision"], rec.get("defect_type"), rec["why"], json.dumps(rec["tools"]),
                  json.dumps(rec["trace"], ensure_ascii=False), json.dumps(rec.get("type_probs")), json.dumps(rec["timings"]),
-                 rec["map_b64"], json.dumps(rec["map_shape"]), json.dumps(rec.get("image_size"))))
+                 rec["map_b64"], json.dumps(rec["map_shape"]), json.dumps(rec.get("image_size")), 1 if rec.get("is_test") else 0))
             return cur.lastrowid
 
     @staticmethod
@@ -61,9 +66,36 @@ class Store:
         d.pop("sha256", None)
         return d
 
-    def list(self, limit=200):
+    def list(self, limit=200, include_test=False):
+        """대시보드 목록(최신순). 점검용 테스트 검사(is_test=1)는 기본으로 제외한다."""
+        q = "SELECT * FROM inspections {} ORDER BY id DESC LIMIT ?".format("" if include_test else "WHERE is_test = 0")
         with self._conn() as c:
-            return [self._row(r) for r in c.execute("SELECT * FROM inspections ORDER BY id DESC LIMIT ?", (limit,))]
+            return [self._row(r) for r in c.execute(q, (limit,))]
+
+    def counts(self):
+        with self._conn() as c:
+            r = c.execute("SELECT COUNT(*) AS n, COALESCE(SUM(is_test), 0) AS t FROM inspections").fetchone()
+            return {"total": r["n"], "test": r["t"], "real": r["n"] - r["t"]}
+
+    def backup(self):
+        """DB 파일을 같은 폴더에 날짜가 붙은 복사본으로 저장하고 경로를 돌려준다 (삭제 전에 항상 호출)."""
+        import shutil
+        dst = os.path.join(os.path.dirname(self.path), "dashboard_backup_{}.sqlite3".format(time.strftime("%Y%m%d_%H%M%S")))
+        with self._lock:
+            src = sqlite3.connect(self.path)
+            try:
+                out = sqlite3.connect(dst)
+                src.backup(out)          # 실행 중이어도 일관된 복사
+                out.close()
+            finally:
+                src.close()
+        return dst
+
+    def purge(self, test_only=True):
+        """기록 삭제. test_only=True 면 점검용 테스트 검사만, False 면 전부. 삭제한 건수를 돌려준다."""
+        with self._lock, self._conn() as c:
+            cur = c.execute("DELETE FROM inspections WHERE is_test = 1" if test_only else "DELETE FROM inspections")
+            return cur.rowcount
 
     def get(self, rid):
         with self._conn() as c:

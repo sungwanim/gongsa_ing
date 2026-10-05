@@ -30,6 +30,7 @@ def check(name, ok, detail="", warn=False):
 
 def request(url, token, data=None, method=None):
     r = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"))
+    r.add_header("X-E2E-Test", "1")        # 이 점검의 검사는 대시보드에 보이지 않게 표시(점검 후 자동 정리됨)
     if token:
         r.add_header("Authorization", "Bearer " + token)
     if data is not None:
@@ -127,11 +128,14 @@ def main():
         check("이미지가 아닌 파일은 거절(400)", False, "거절되지 않음")
     except urllib.error.HTTPError as e:
         check("이미지가 아닌 파일은 거절(400)", e.code == 400, "HTTP {}".format(e.code))
-    st, body = get(base + "/api/dashboard", tok)
+    st, body = get(base + "/api/dashboard?include_test=1", tok)
     txt = body.decode()
     dash = json.loads(txt)["items"]
     check("대시보드에 결과 저장", len(dash) >= len(runs), "{}건".format(len(dash)))
     check("대시보드 응답에 경로·파일명·해시가 없음", "AeBAD" not in txt and "sha256" not in txt and ".png" not in txt)
+    st, body = get(base + "/api/dashboard", tok)
+    shown = [i for i in json.loads(body)["items"] if i.get("is_test")]
+    check("점검용 검사는 기본 대시보드 목록에 보이지 않음", not shown, "{}건 노출".format(len(shown)))
 
     # 4) 인증
     if a.expect_auth:

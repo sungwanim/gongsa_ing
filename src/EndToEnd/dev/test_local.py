@@ -159,6 +159,46 @@ def main():
     except RuntimeError as e:
         check("분리 위반이면 시작 거부", "분리 위반" in str(e))
 
+    # ---- 점검용 검사는 대시보드에서 제외 / 정리 / 이전 DB 마이그레이션 ----
+    def inspect_with(base_, gid, test):
+        r = urllib.request.Request("{}/api/inspect/gallery/{}".format(base_, gid), method="POST")
+        if test:
+            r.add_header("X-E2E-Test", "1")
+        urllib.request.urlopen(r, timeout=60).read()
+
+    mock_artifacts.make(os.path.join(tmp, "art"))        # 앞의 '분리 위반' 테스트가 망가뜨린 기준값을 다시 깨끗하게 만든다 (같은 내용이라 id 도 같음)
+    tmp3 = tempfile.mkdtemp()
+    env3 = dict(env, AGENT_DATA_DIR=os.path.join(tmp3, "db"))
+    app4, srv4, base4 = start(Settings(env3))
+    inspect_with(base4, gal[0]["id"], True)
+    inspect_with(base4, gal[1]["id"], True)
+    inspect_with(base4, gal[2]["id"], False)
+    default_items = json.loads(get(base4 + "/api/dashboard")[1])["items"]
+    all_items = json.loads(get(base4 + "/api/dashboard?include_test=1")[1])["items"]
+    check("X-E2E-Test 검사는 기본 대시보드에서 제외(실제 1건만 보임)", len(default_items) == 1 and len(all_items) == 3, "{}건 / 전체 {}건".format(len(default_items), len(all_items)))
+    c = app4.store.counts()
+    check("counts: 실제 1 / 테스트 2", (c["real"], c["test"]) == (1, 2), str(c))
+    bak = app4.store.backup()
+    check("삭제 전 백업 파일 생성", os.path.isfile(bak) and os.path.getsize(bak) > 0, os.path.basename(bak))
+    check("purge(test_only): 테스트 2건만 삭제하고 실제 1건은 유지", app4.store.purge(test_only=True) == 2 and app4.store.counts()["real"] == 1)
+    srv4.shutdown()
+    # 이전 버전 DB(is_test 열 없음): 기록은 그대로 보이고 열만 추가된다
+    import sqlite3
+    old_dir = os.path.join(tmp3, "old")
+    os.makedirs(old_dir)
+    con = sqlite3.connect(os.path.join(old_dir, "dashboard.sqlite3"))
+    con.execute("""CREATE TABLE inspections (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, source TEXT NOT NULL, sha256 TEXT NOT NULL,
+        sep_flag TEXT, mmr_score REAL, rscore REAL, zone TEXT, decision TEXT, defect_type TEXT, why TEXT, tools TEXT, trace TEXT, type_probs TEXT,
+        timings TEXT, map_b64 TEXT, map_shape TEXT, image_size TEXT)""")
+    con.execute("INSERT INTO inspections (created_at, source, sha256, mmr_score, rscore, zone, decision, why, tools, trace, timings, map_b64, map_shape) "
+                "VALUES ('2026-10-05 00:00:00','gallery','x',0.5,0.1,'amb','defect','old','[]','[]','{\"total_s\": 1.0}','AA','[1,1]')")
+    con.commit()
+    con.close()
+    from store import Store
+    migrated = Store(old_dir)
+    items = migrated.list()
+    check("이전 DB 마이그레이션: 기존 기록 보존(is_test=0)", len(items) == 1 and items[0]["is_test"] == 0 and items[0]["why"] == "old")
+
     # agent.py 오프라인 평가 방식(저장된 결과 조회 함수 주입)이 그대로 동작하는지
     import agent as A
     import numpy as np
