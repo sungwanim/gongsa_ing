@@ -1,4 +1,5 @@
-"""GPU/모델 없이 흐름을 확인하는 모의 구성요소 (AGENT_MOCK=1). 실제 판정 능력은 없다."""
+"""[개발/테스트 전용] GPU 없이 서비스의 배관(업로드·SSE·DB·인증·분리 검사)과 화면을 확인하기 위한 가짜 구성요소.
+판정 결과는 이미지 해시로 정해지는 무작위 값이라 의미가 없다. 데모나 성능 확인에 쓰지 않는다. 운영 코드(agent_service)는 이 파일을 import 하지 않는다."""
 import base64
 import hashlib
 
@@ -46,3 +47,18 @@ class FakeRefClassifier:
 
 def fake_v7(path):
     return FakeRefClassifier().classify(path)["probs"]
+
+
+def build_mock_app(settings):
+    """가짜 MMR + MockBrain + 가짜 Qwen 확률로 App 을 조립한다 (테스트·UI 개발용)."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent_service"))
+    import agent as A
+    import server
+    from online_agent import OnlineAgent
+    from params import Params
+    settings.validate()
+    params = Params(os.path.join(settings.artifacts, "params.json"))
+    ref = FakeRefClassifier()
+    return server.App(settings, FakeMMR(), OnlineAgent(params, A.MockBrain(), lambda p: ref.classify(p)["probs"], fake_v7))

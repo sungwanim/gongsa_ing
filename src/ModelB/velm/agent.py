@@ -12,6 +12,7 @@
   second_prompt : 다른 프롬프트(v7)로 같은 사진을 다시 판정 (저장된 결과가 있으면 사용)
   zoom_check    : 이상 맵이 가리킨 부위를 원본 해상도로 확대해서 '진짜 손상인가, 반사/그림자인가' 를 Qwen에게 물음 (GPU 필요)
   decide        : 지금까지의 증거로 확정
+온라인(실시간) 사용: ToolBox 에 증거 출처를 함수로 주입하고 run_agent(..., on_event=콜백) 로 진행을 받는다 (src/EndToEnd/agent_service).
 사용
   python agent.py --mmr-out ... --router --eval --limit 40            (GPU, Qwen 에이전트)
   python agent.py --mmr-out ... --router --eval --limit 40 --mock     (GPU 없이 흐름만 확인하는 규칙 기반 두뇌)
@@ -20,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -71,9 +73,14 @@ def defect_type(ev):
 
 # ---------------------------------------------------------------- 도구
 class ToolBox:
-    def __init__(self, p1, p2, maps=None, tau_lo=None, model=None, processor=None, ref_clf=None, zoom_fn=None):
-        self.p1, self.p2, self.maps, self.tau_lo = p1, p2, maps, tau_lo
-        self.model, self.processor, self.ref_clf, self.zoom_fn = model, processor, ref_clf, zoom_fn
+    """도구 실행기. 증거의 출처는 함수로 주입한다 (오프라인 평가: 저장된 결과 조회 / 온라인: 즉석 계산).
+      map_of(r)    -> 이상 맵(2차원 배열). None 이면 맵 모양 요약을 생략
+      whole_of(r)  -> ask_whole 결과: Qwen 5-class 확률 dict (없으면 None)
+      second_of    -> second_prompt 결과: r -> 확률 dict (없으면 None). 이 인자 자체가 None 이면 도구를 제공하지 않음
+      zoom_fn      -> zoom_check: r -> 손상 확률. None 이면 도구를 제공하지 않음"""
+
+    def __init__(self, map_of, whole_of, second_of, tau_lo, zoom_fn=None):
+        self.map_of, self.whole_of, self.second_of, self.tau_lo, self.zoom_fn = map_of, whole_of, second_of, tau_lo, zoom_fn
 
     def available(self, ev, used):
         """아직 안 쓴 도구만 + 필요한 자원이 있는 도구만."""
@@ -84,13 +91,12 @@ class ToolBox:
                 continue
             if n == "zoom_check" and self.zoom_fn is None:
                 continue
-            if n == "second_prompt" and self.p2 is None:
+            if n == "second_prompt" and self.second_of is None:
                 continue
             out.append(n)
         return out
 
     def run(self, name, r, ev):
-        k = q.key(r)
         if name == "read_map":
             txt = "MMR 점수 {:.3f}".format(r["score"])
             if "rscore" in r:
@@ -102,24 +108,23 @@ class ToolBox:
                 "confident": "이미 불량으로 확정된 구간이라 정상으로 바뀌지 않음, 불량 종류가 필요하면 ask_whole",
                 "clear_normal": "더 확인하지 않으면 정상으로 남음, 정상 확정이 틀렸는지 보려면 ask_whole",
                 "amb": "정상으로 인정하려면 ask_whole 결과가 반드시 필요함"}[r["zone10"]]
-            if self.maps is not None:
+            m = self.map_of(r) if self.map_of is not None else None
+            if m is not None:
                 import region_crop as rc
-                f = rc.map_features(self.maps.get(q.resolve(r["path"])))
+                f = rc.map_features(m)
                 txt += "; 이상 부위 면적비율 {:.3f}, 덩어리 {}개, 가늘기 {:.1f}, 가장자리까지 거리 {:.2f}".format(f[5], int(f[7]), f[8], f[12])
             return txt
         if name == "ask_whole":
-            pr = self.p1.get(k)
-            if pr is None and self.ref_clf is not None:
-                pr = self.ref_clf.classify(q.resolve(r["path"]))["probs"]
+            pr = self.whole_of(r)
             if pr is None:
-                return "결과 없음 (이 사진은 전체 판정이 저장돼 있지 않음)"
+                return "결과 없음 (이 사진은 전체 판정 결과가 없음)"
             ev["pn_whole"], ev["probs_whole"] = pr.get("normal", 0.0), pr
             top = max(pr, key=pr.get)
             return "ask_whole 결과 (Qwen이 참고 불량 사진 12장과 비교한 판정, 이상 탐지기 아님): 정상 확률 {:.3f}, 가장 높은 항목 {} ({:.3f})".format(pr.get("normal", 0.0), top, pr[top])
         if name == "second_prompt":
-            pr = self.p2.get(k) if self.p2 is not None else None
+            pr = self.second_of(r) if self.second_of is not None else None
             if pr is None:
-                return "결과 없음 (이 사진은 두 번째 프롬프트 결과가 저장돼 있지 않음)"
+                return "결과 없음 (이 사진은 두 번째 프롬프트 결과가 없음)"
             ev["pn_v7"] = pr.get("normal", 0.0)
             return "두 번째 프롬프트 결과: 정상 확률 {:.3f}".format(ev["pn_v7"])
         if name == "zoom_check":
@@ -199,16 +204,21 @@ class QwenBrain:
 
 
 # ---------------------------------------------------------------- 루프
-def run_agent(r, brain, tools, t, max_steps=5, auto_map=False, auto_whole=False, skip_confident=False):
+def run_agent(r, brain, tools, t, max_steps=5, auto_map=False, auto_whole=False, skip_confident=False, on_event=None):
     """한 사진에 대해 생각 -> 행동 -> 관찰 루프를 돈다.
     보조 옵션(컨트롤러가 대신 해 주는 것, 기록에 auto=True 로 표시):
       auto_map       : 시작할 때 read_map 을 자동 실행 (에이전트는 첫 관찰을 받은 상태에서 시작)
       skip_confident : 확실한 불량 구간은 에이전트가 고민하지 않고 종류 확인(ask_whole)만 자동 실행 후 확정
-      auto_whole     : 에이전트가 ask_whole 없이 decide 하려 하면 컨트롤러가 먼저 ask_whole 을 실행 (확인 누락 보완)"""
+      auto_whole     : 에이전트가 ask_whole 없이 decide 하려 하면 컨트롤러가 먼저 ask_whole 을 실행 (확인 누락 보완)
+    on_event(이름, dict): 진행을 실시간으로 받는 콜백 (thought / action / tool_start / observation). 실시간 화면용."""
     ev, log, trace, used = {}, [], [], set()
+    emit = on_event or (lambda name, data: None)
 
     def auto(action, thought):
+        emit("tool_start", {"tool": action, "auto": True})
+        t0 = time.time()
         obs = tools.run(action, r, ev)
+        emit("observation", {"tool": action, "text": obs, "sec": round(time.time() - t0, 2), "auto": True})
         used.add(action)
         log.append((action, obs))
         trace.append({"thought": thought, "action": action, "observation": obs, "auto": True})
@@ -225,19 +235,24 @@ def run_agent(r, brain, tools, t, max_steps=5, auto_map=False, auto_whole=False,
             cp = getattr(brain, "last_probs", None)
             if action not in options:
                 action = "decide"
+            emit("thought", {"text": thought, "options": list(options)})
+            emit("action", {"tool": action, "choice_probs": cp})
             if action == "decide":
                 if auto_whole and "ask_whole" not in used:
                     auto("ask_whole", "(자동 보완) 전체 사진 판정이 빠져 있어 먼저 실행한다")
                 trace.append({"thought": thought, "action": "decide", "observation": "확정", "choice_probs": cp})
                 break
+            emit("tool_start", {"tool": action})
+            t0 = time.time()
             obs = tools.run(action, r, ev)
+            emit("observation", {"tool": action, "text": obs, "sec": round(time.time() - t0, 2)})
             used.add(action)
             log.append((action, obs))
             trace.append({"thought": thought, "action": action, "observation": obs, "choice_probs": cp})
     dec, why = final_decision(r["zone10"], ev, t)
     return {"key": q.key(r), "zone": r["zone10"], "true": r["type"], "label": r["label"], "pred_defect": dec,
             "type": defect_type(ev) if dec else "good", "why": why, "evidence": {k: v for k, v in ev.items() if k != "probs_whole"},
-            "trace": trace}
+            "type_probs": ev.get("probs_whole"), "trace": trace}
 
 
 def baseline_pred(r, p1, t):
@@ -297,7 +312,9 @@ def main():
     if not a.no_zoom and not a.mock:
         print("zoom_check 도구는 아직 GPU 구현 전입니다 (--no-zoom 으로 실행하세요)")
         a.no_zoom = True
-    tools = ToolBox(p1, p2, maps, lo, zoom_fn=zoom_fn)
+    # 오프라인 평가: 저장된 결과를 조회하는 출처 함수 (온라인은 src/EndToEnd/agent_service 가 즉석 계산 함수를 주입)
+    tools = ToolBox(map_of=lambda r: maps.get(q.resolve(r["path"])), whole_of=lambda r: p1.get(q.key(r)),
+                    second_of=lambda r: p2.get(q.key(r)), tau_lo=lo, zoom_fn=zoom_fn)
     if a.mock:
         brain = MockBrain()
     else:

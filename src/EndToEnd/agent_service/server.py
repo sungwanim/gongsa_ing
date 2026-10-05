@@ -57,17 +57,15 @@ class App:
         with open(os.path.join(settings.artifacts, "gallery.json")) as f:
             self.gallery = json.load(f)["items"]
         self.gallery_by_id = {g["id"]: g for g in self.gallery}
-        if not settings.mock:        # 갤러리 파일이 오프라인 단계와 같은 파일인지(해시) 시작 때 확인
-            for g in self.gallery:
-                p = os.path.join(settings.data_root, g["file"])
-                if sep.sha256_file(p) != g["sha256"]:
-                    raise SystemExit("갤러리 이미지가 변경되었습니다: {}".format(g["id"]))
+        for g in self.gallery:        # 갤러리 파일이 오프라인 단계와 같은 파일인지(해시) 시작 때 확인
+            if sep.sha256_file(os.path.join(settings.data_root, g["file"])) != g["sha256"]:
+                raise SystemExit("갤러리 이미지가 변경되었습니다: {}".format(g["id"]))
 
     def gallery_path(self, gid):
         g = self.gallery_by_id.get(gid)
         if not g:
             return None
-        return os.path.join(self.s.data_root if not self.s.mock else self.s.artifacts, g["file"])
+        return os.path.join(self.s.data_root, g["file"])
 
     def thumb(self, gid):
         if gid not in self._thumbs:
@@ -133,7 +131,7 @@ def make_handler(app):
         def do_GET(self):
             path = urlparse(self.path).path
             if path == "/api/health":          # 인증 없이 상태만 (민감 정보 없음)
-                return self._json(200, {"status": "ok", "ready": app.ready, "busy": app.busy.locked(), "mock": s.mock})
+                return self._json(200, {"status": "ok", "ready": app.ready, "busy": app.busy.locked()})
             if not self._authorized():
                 return self._json(401, {"error": "unauthorized"})
             if path == "/api/gallery":
@@ -246,13 +244,9 @@ def make_handler(app):
 
 
 def build_app(settings):
-    """모의 모드면 가짜 MMR/Qwen, 아니면 MMR 서비스 + 실제 Qwen 에이전트를 만든다."""
+    """운영용: MMR 서비스 + 실제 Qwen 에이전트. (가짜 구성요소는 dev/ 에만 있고 테스트가 App 에 직접 주입한다)"""
     settings.validate()
     params = Params(os.path.join(settings.artifacts, "params.json"))
-    if settings.mock:
-        import agent as A
-        from mock_backends import FakeMMR, FakeRefClassifier, fake_v7
-        return App(settings, FakeMMR(), OnlineAgent(params, A.MockBrain(), FakeRefClassifier(), fake_v7))
     from mmr_client import MMRClient
     from qwen_backend import load_qwen
     mmr = MMRClient(settings.mmr_url)
@@ -266,7 +260,7 @@ def build_app(settings):
 def main():
     s = Settings()
     app = build_app(s)
-    print("에이전트 서비스 시작 http://{}:{} (mock={}, 인증={})".format(s.host, s.port, s.mock, "토큰" if s.token else "없음(로컬 전용)"), flush=True)
+    print("에이전트 서비스 시작 http://{}:{} (인증={})".format(s.host, s.port, "토큰" if s.token else "없음(로컬 전용)"), flush=True)
     ThreadingHTTPServer((s.host, s.port), make_handler(app)).serve_forever()
 
 

@@ -15,7 +15,6 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 class Settings:
     def __init__(self, env=None):
         e = os.environ if env is None else env
-        self.mock = e.get("AGENT_MOCK", "0") == "1"
         self.artifacts = e.get("AGENT_ARTIFACTS", "")             # params.json / separation.json / gallery.json 이 있는 폴더
         self.data_root = e.get("AGENT_DATA_ROOT", "")             # AeBAD 폴더 (갤러리·참고 이미지 읽기 전용)
         self.mmr_url = e.get("AGENT_MMR_URL", "http://127.0.0.1:8101")
@@ -31,7 +30,7 @@ class Settings:
     def validate(self):
         if not self.artifacts or not os.path.isdir(self.artifacts):
             raise SystemExit("AGENT_ARTIFACTS(기준값 폴더)를 지정하세요: {!r}".format(self.artifacts))
-        if not self.mock and not (self.data_root and os.path.isdir(self.data_root)):
+        if not (self.data_root and os.path.isdir(self.data_root)):
             raise SystemExit("AGENT_DATA_ROOT(AeBAD 폴더)를 지정하세요: {!r}".format(self.data_root))
         if self.host not in LOOPBACK and not self.token:
             raise SystemExit("로컬 주소({})가 아닌 곳에 열려면 AGENT_TOKEN(접근 토큰)이 필요합니다.".format(self.host))

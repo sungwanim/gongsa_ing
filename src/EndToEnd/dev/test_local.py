@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 from PIL import Image  # noqa: E402
 
 import mock_artifacts  # noqa: E402
+import mock_backends  # noqa: E402
 import server  # noqa: E402
 from config import Settings  # noqa: E402
 
@@ -48,7 +49,7 @@ def get(url, token=None):
 
 
 def start(settings):
-    app = server.build_app(settings)
+    app = mock_backends.build_mock_app(settings)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(app))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return app, srv, "http://127.0.0.1:{}".format(srv.server_address[1])
@@ -57,11 +58,11 @@ def start(settings):
 def main():
     tmp = tempfile.mkdtemp()
     info = mock_artifacts.make(os.path.join(tmp, "art"))
-    env = {"AGENT_MOCK": "1", "AGENT_ARTIFACTS": os.path.join(tmp, "art"), "AGENT_DATA_DIR": os.path.join(tmp, "db")}
+    env = {"AGENT_ARTIFACTS": os.path.join(tmp, "art"), "AGENT_DATA_ROOT": os.path.join(tmp, "art"), "AGENT_DATA_DIR": os.path.join(tmp, "db")}
     app, srv, base = start(Settings(env))
 
     st, body = get(base + "/api/health")
-    check("health", st == 200 and json.loads(body)["mock"] is True)
+    check("health", st == 200 and json.loads(body)["status"] == "ok")
     gal = json.loads(get(base + "/api/gallery")[1])["items"]
     check("gallery 목록: id/thumb 만 노출", len(gal) == 6 and set(gal[0]) == {"id", "thumb"}, str(gal[0]))
     st, th = get(base + gal[0]["thumb"])
@@ -153,10 +154,21 @@ def main():
     d["calib"].append(d["gallery"][0])
     json.dump(d, open(os.path.join(bad, "separation.json"), "w"))
     try:
-        server.build_app(Settings(dict(env, AGENT_DATA_DIR=os.path.join(tmp, "db3"))))
+        mock_backends.build_mock_app(Settings(dict(env, AGENT_DATA_DIR=os.path.join(tmp, "db3"))))
         check("분리 위반이면 시작 거부", False)
     except RuntimeError as e:
         check("분리 위반이면 시작 거부", "분리 위반" in str(e))
+
+    # agent.py 오프라인 평가 방식(저장된 결과 조회 함수 주입)이 그대로 동작하는지
+    import agent as A
+    import numpy as np
+    stored_whole = {"k1": {"normal": 0.5, "ablation": 0.2, "breakdown": 0.1, "fracture": 0.1, "groove": 0.1}}
+    tools = A.ToolBox(map_of=lambda r: np.random.RandomState(0).rand(224, 224), whole_of=lambda r: stored_whole.get(r["domain"]),
+                      second_of=lambda r: None, tau_lo=-0.5)
+    row = {"domain": "k1", "path": "x", "score": 0.5, "rscore": 0.3, "zone10": "amb", "type": "t", "label": 1}
+    seen = []
+    res = A.run_agent(row, A.MockBrain(), tools, 0.98, on_event=lambda n, d: seen.append(n))
+    check("오프라인 방식 ToolBox/run_agent 동작 + 이벤트 콜백", res["pred_defect"] == 1 and "thought" in seen and res["type_probs"] is not None, str(seen))
 
     print("\n{} / {} 통과".format(sum(ok), len(ok)))
     sys.exit(0 if all(ok) else 1)

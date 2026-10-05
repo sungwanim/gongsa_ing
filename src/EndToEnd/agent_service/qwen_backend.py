@@ -37,5 +37,6 @@ def load_qwen(settings, params):
     print("참고 이미지 {}장 (ask_whole)".format(len(refs)), flush=True)
     ref_clf = CachedRefClassifier(model, processor, refs, settings.ref_px)
     brain = A.QwenBrain(model, processor, t=params.t)
+    whole_fn = lambda path: ref_clf.classify(path)["probs"]
     v7_fn = lambda path: classify_image(path, model, processor, prompt="v7")["probs"]
-    return OnlineAgent(params, brain, ref_clf, v7_fn)
+    return OnlineAgent(params, brain, whole_fn, v7_fn)
