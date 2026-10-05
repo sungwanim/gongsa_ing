@@ -153,29 +153,38 @@ cmd_check() {
 
   head_ "2. conda 환경"
   if need_conda; then
-    local env want out
+    # conda run 은 출력 형식이 환경마다 달라(빈 줄 등) 쓰지 않는다. 활성화 후 실행하고 마지막 비어 있지 않은 줄을 읽는다.
+    local env want out raw key pair rest
     for pair in "$MMR_ENV:2.1:mmr" "$AGENT_ENV:2.8:agent"; do
       env="${pair%%:*}"; rest="${pair#*:}"; want="${rest%%:*}"; key="${rest##*:}"
       if ! conda env list | awk '{print $1}' | grep -qx "$env"; then
         res "env_$key" "환경 $env" "conda 환경이 없음 (conda env list 로 이름 확인, 다르면 e2e.conf 의 MMR_ENV/AGENT_ENV)" FAIL
         continue
       fi
-      out="$(conda run -n "$env" python -c 'import torch;print(torch.__version__, torch.cuda.is_available())' 2>&1 | tail -1)"
-      if echo "$out" | grep -qE "iJIT_NotifyEvent|ImportError|Error"; then
-        res "env_$key" "환경 $env (torch)" "$out  -> 공유 환경이 훼손된 것으로 보임. 설치하지 말고 알려 주세요" FAIL
+      raw="$(run_in_env "$env" "$E2E_SRC" python -c 'import torch;print(torch.__version__, torch.cuda.is_available())' 2>&1)"
+      out="$(printf '%s\n' "$raw" | grep -v '^[[:space:]]*$' | tail -1)"
+      oneline="$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-220)"
+      if echo "$raw" | grep -qE "iJIT_NotifyEvent|undefined symbol|libtorch|libtorchaudio|OSError"; then
+        res "env_$key" "환경 $env (torch)" "라이브러리 충돌 증상 — 환경이 훼손된 것으로 보임. 설치하지 말고 알려 주세요. 원문: $oneline" FAIL
+      elif echo "$raw" | grep -qE "ModuleNotFoundError|ImportError|Traceback"; then
+        res "env_$key" "환경 $env (torch)" "torch 를 불러오지 못함 (설치하지 말고 알려 주세요). 원문: $oneline" FAIL
       elif echo "$out" | grep -q "^$want" && echo "$out" | grep -q "True"; then
         res "env_$key" "환경 $env (torch, GPU)" "$out" PASS
       else
-        res "env_$key" "환경 $env (torch, GPU)" "$out (기대: $want.x, GPU True)" FAIL
+        res "env_$key" "환경 $env (torch, GPU)" "기대 $want.x + GPU True, 실제 출력: ${oneline:-(출력 없음)}" FAIL
       fi
     done
     if conda env list | awk '{print $1}' | grep -qx "$MMR_ENV"; then
-      out="$(conda run -n "$MMR_ENV" python -c 'import timm,scipy,sklearn,torchvision;print("timm", timm.__version__)' 2>&1 | tail -1)"
-      echo "$out" | grep -q "^timm" && ok "mmr 패키지 ($out)" || bad "mmr 패키지 import 실패: $out"
+      raw="$(run_in_env "$MMR_ENV" "$E2E_SRC" python -c 'import timm,scipy,sklearn,torchvision;print("timm", timm.__version__)' 2>&1)"
+      out="$(printf '%s\n' "$raw" | grep -v '^[[:space:]]*$' | tail -1)"
+      if echo "$out" | grep -q "^timm"; then res pkg_mmr "mmr 패키지(timm, scipy, sklearn, torchvision)" "$out" PASS
+      else res pkg_mmr "mmr 패키지(timm, scipy, sklearn, torchvision)" "import 실패: $(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-220)" FAIL; fi
     fi
     if conda env list | awk '{print $1}' | grep -qx "$AGENT_ENV"; then
-      out="$(conda run -n "$AGENT_ENV" python -c 'import transformers,sklearn,scipy,PIL;from qwen_vl_utils import process_vision_info;print("transformers", transformers.__version__)' 2>&1 | tail -1)"
-      echo "$out" | grep -q "^transformers" && ok "velm_qwen 패키지 ($out)" || bad "velm_qwen 패키지 import 실패: $out"
+      raw="$(run_in_env "$AGENT_ENV" "$E2E_SRC" python -c 'import transformers,sklearn,scipy,PIL;from qwen_vl_utils import process_vision_info;print("transformers", transformers.__version__)' 2>&1)"
+      out="$(printf '%s\n' "$raw" | grep -v '^[[:space:]]*$' | tail -1)"
+      if echo "$out" | grep -q "^transformers"; then res pkg_agent "velm_qwen 패키지(transformers, sklearn, scipy, PIL, qwen_vl_utils)" "$out" PASS
+      else res pkg_agent "velm_qwen 패키지(transformers, sklearn, scipy, PIL, qwen_vl_utils)" "import 실패: $(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-220)" FAIL; fi
     fi
   fi
 
@@ -192,25 +201,29 @@ cmd_check() {
   info "디스크: $(df -h "$HOME" | tail -1 | awk '{print "남은 " $4 " (사용 " $5 ")"}')"
 
   head_ "4. 입력 파일 (읽기 전용)"
-  local f0=$FAILS
-  [ -f "$MMR_CKPT" ] && ok "MMR 체크포인트 ($(du -h "$MMR_CKPT" | cut -f1))" || bad "MMR 체크포인트 없음: $MMR_CKPT"
+  if [ -f "$MMR_CKPT" ]; then res in_ckpt "MMR 체크포인트" "$(du -h "$MMR_CKPT" | cut -f1)  ($MMR_CKPT)" PASS; else res in_ckpt "MMR 체크포인트" "없음: $MMR_CKPT" FAIL; fi
   local n
   if [ -d "$DATA_ROOT/AeBAD_S/test" ]; then
     n="$(find "$DATA_ROOT/AeBAD_S/test" -type f -name '*.png' ! -name '._*' | wc -l | tr -d ' ')"
-    [ "$n" = "1639" ] && ok "테스트 이미지 ${n}장 (DATA_ROOT=$DATA_ROOT)" || wr "테스트 이미지 ${n}장 (기대 1639)"
+    if [ "$n" = "1639" ]; then res in_images "테스트 이미지 수 (DATA_ROOT=$DATA_ROOT)" "$n장" PASS; else res in_images "테스트 이미지 수 (DATA_ROOT=$DATA_ROOT)" "${n}장 (기대 1639)" WARN; fi
   else
-    bad "데이터셋 없음: $DATA_ROOT/AeBAD_S/test"
+    res in_images "테스트 이미지 (DATA_ROOT=$DATA_ROOT)" "폴더 없음: $DATA_ROOT/AeBAD_S/test" FAIL
   fi
-  n="$(ls "$MMR_OUT"/image_scores_*.csv 2>/dev/null | wc -l | tr -d ' ')"; [ "$n" = "4" ] && ok "MMR 점수 csv ${n}개" || bad "MMR 점수 csv ${n}개 (기대 4) — build_params 가 읽음"
-  n="$(ls "$MMR_OUT"/anomaly_maps_*.npz 2>/dev/null | wc -l | tr -d ' ')"; [ "$n" = "4" ] && ok "MMR 이상 맵 npz ${n}개" || bad "MMR 이상 맵 npz ${n}개 (기대 4) — build_params 가 읽음"
+  local nc nn
+  nc="$(ls "$MMR_OUT"/image_scores_*.csv 2>/dev/null | wc -l | tr -d ' ')"; nn="$(ls "$MMR_OUT"/anomaly_maps_*.npz 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$nc" = "4" ] && [ "$nn" = "4" ]; then res in_mmr_files "MMR 점수 csv / 이상 맵 npz (build_params 가 읽음)" "$nc개 / $nn개" PASS; else res in_mmr_files "MMR 점수 csv / 이상 맵 npz (build_params 가 읽음)" "$nc개 / $nn개 (기대 4 / 4), MMR_OUT=$MMR_OUT" FAIL; fi
+  local miss="" lines=""
   for f in qwen_results_v8_n12.jsonl qwen_results_v7.jsonl; do
-    [ -f "$VELM_RESULTS/$f" ] && ok "Qwen 저장 결과 $f ($(wc -l < "$VELM_RESULTS/$f" | tr -d ' ')줄)" || bad "Qwen 저장 결과 없음: $VELM_RESULTS/$f"
+    if [ -f "$VELM_RESULTS/$f" ]; then lines="$lines $f=$(wc -l < "$VELM_RESULTS/$f" | tr -d ' ')줄"; else miss="$miss $f"; fi
   done
+  if [ -z "$miss" ]; then res in_qwen "Qwen 저장 결과(build_params 가 읽음)" "$lines" PASS; else res in_qwen "Qwen 저장 결과(build_params 가 읽음)" "없음:$miss (VELM_RESULTS=$VELM_RESULTS)" FAIL; fi
+  miss=""; lines=""
   for f in holdout_manifest.csv holdout_manifest_12.csv holdout_manifest_60.csv; do
-    [ -f "$E2E_ROOT/src/ModelB/velm/$f" ] && ok "목록 $f ($(wc -l < "$E2E_ROOT/src/ModelB/velm/$f" | tr -d ' ')줄)" || bad "목록 없음: $f"
+    if [ -f "$E2E_ROOT/src/ModelB/velm/$f" ]; then lines="$lines $f=$(wc -l < "$E2E_ROOT/src/ModelB/velm/$f" | tr -d ' ')줄"; else miss="$miss $f"; fi
   done
-  ls ~/.cache/torch/hub/checkpoints/wide_resnet50_2-* >/dev/null 2>&1 && ok "MMR 교사 가중치 캐시 있음" || wr "MMR 교사 가중치 캐시 없음 (처음 실행 때 내려받음, 인터넷 필요)"
-  if [ "$FAILS" = "$f0" ]; then res inputs "입력 파일 점검" "모두 확인" PASS; else res inputs "입력 파일 점검" "FAIL $((FAILS - f0))건 (위 목록 확인)" FAIL; fi
+  if [ -z "$miss" ]; then res in_manifests "참고/제외 목록(헤더 포함 줄 수)" "$lines" PASS; else res in_manifests "참고/제외 목록" "없음:$miss" FAIL; fi
+  if ls ~/.cache/torch/hub/checkpoints/wide_resnet50_2-* >/dev/null 2>&1; then res in_teacher "MMR 교사 가중치 캐시" "있음" PASS
+  else res in_teacher "MMR 교사 가중치 캐시" "없음 (처음 실행 때 내려받음, 인터넷 필요)" WARN; fi
 }
 
 # ------------------------------------------------------------------ params
